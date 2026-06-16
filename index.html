@@ -818,7 +818,7 @@ query NftSales($collectionAddress: String!, $count: Int!, $cursor: String) {
     cursor
     items {
       ... on NftItem {
-        address index name
+        address index name externalLink
         attributes { key value }
         sale {
           ... on NftSaleFix { fullPrice }
@@ -1140,18 +1140,33 @@ async function fetchCollectionSales(colName, maxItems, onProgress) {
 
 async function enrichWithRealPower(miners, onProgress) {
   if (!getSettings().token) return;
-  const CONCURRENCY = 8;
+  const CONCURRENCY = 5;
   let done = 0;
 
   async function processOne(miner) {
     try {
-      let gmData = await gmGet(`/miners/${miner.index}`);
-      if (!gmData && miner.address) {
-        gmData = await gmGet(`/nfts/by-address/${miner.address}`);
+      // Step 1: get externalUrlId if we don't have it yet
+      if (!miner.externalUrlId && miner.address) {
+        try {
+          const ton = parseTonapiNft(await tonapiGetNft(miner.address));
+          if (ton?.externalUrlId) miner.externalUrlId = ton.externalUrlId;
+          // Also pick up baseline power if missing
+          if (!miner.baselinePower && ton?.attributes) {
+            miner.baselinePower = parseBaselinePower(ton.attributes);
+            miner.baselineEff   = parseEfficiency(ton.attributes);
+          }
+        } catch(e) { /* tonapi optional */ }
       }
-      if (gmData) {
-        miner.realPower = parseGmPower(gmData);
-        miner.realEff   = parseGmEfficiency(gmData);
+
+      // Step 2: call GoMining API
+      const gm = await gmFetchMiner(miner.index, miner.externalUrlId);
+      if (gm && !gm.error) {
+        miner.realPower  = gm.power;
+        miner.realEff    = gm.efficiency;
+        miner.isUpgraded = gm.isUpgraded;
+        miner.gmLevel    = gm.level;
+        if (gm.priceUsdt) miner.priceUsdt = gm.priceUsdt;
+        miner.dataSource.push("gomining ✓");
       }
     } catch(e) {
       if (e.message.includes("401")) throw e;
@@ -1591,14 +1606,20 @@ async function scanMarketplace() {
         setStatus("scanStatus", "loading", `${col}: получено ${done} листингов...`, done / total);
       });
 
+      const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
       const miners = rawItems.map(item => {
         const index = parseInt(item.index);
         const attrs = parseAttrs(item.attributes || []);
+        // Try to get GoMining UUID from externalLink field
+        const extUrl = item.externalLink || "";
+        const uuidMatch = extUrl.match(UUID_RE);
+        const externalUrlId = uuidMatch ? uuidMatch[0] : null;
         return {
           index:          isNaN(index) ? 0 : index,
           collectionName: col,
           name:           item.name || `#${index}`,
           address:        item.address || null,
+          externalUrlId,
           isOnSale:       true,
           priceTon:       parsePriceTon(item),
           baselinePower:  parseBaselinePower(attrs),
