@@ -1,0 +1,1264 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GoMining Power Parser</title>
+<style>
+  :root {
+    --bg: #0c0c14;
+    --bg2: #13131f;
+    --bg3: #1a1a2e;
+    --border: #2a2a45;
+    --accent: #7b5ea7;
+    --accent2: #a47fd0;
+    --green: #4caf6e;
+    --yellow: #f0c040;
+    --red: #e05050;
+    --cyan: #4fc3f7;
+    --text: #e0dff5;
+    --muted: #6b6b9a;
+    --card-bg: #16162a;
+    --radius: 12px;
+    --shadow: 0 4px 24px rgba(0,0,0,0.5);
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    line-height: 1.5;
+  }
+
+  /* ── Header ── */
+  header {
+    background: linear-gradient(135deg, #1a0a30 0%, #0c0c14 60%);
+    border-bottom: 1px solid var(--border);
+    padding: 0 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 64px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    backdrop-filter: blur(8px);
+  }
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: -0.3px;
+  }
+  .logo-icon {
+    width: 36px; height: 36px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px;
+  }
+  .logo span { color: var(--accent2); }
+  .header-actions { display: flex; gap: 8px; }
+  .btn-icon {
+    background: var(--bg3); border: 1px solid var(--border);
+    color: var(--text); cursor: pointer; border-radius: 8px;
+    width: 38px; height: 38px; display: flex; align-items: center;
+    justify-content: center; font-size: 18px; transition: all .2s;
+  }
+  .btn-icon:hover { background: var(--border); }
+
+  /* ── Layout ── */
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px 16px; }
+
+  /* ── Settings Panel ── */
+  .settings-panel {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 24px;
+    overflow: hidden;
+    transition: all .3s;
+  }
+  .settings-panel.collapsed .settings-body { display: none; }
+  .settings-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 20px; cursor: pointer;
+    background: var(--bg3); border-bottom: 1px solid var(--border);
+  }
+  .settings-header h3 { font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  .settings-header .chevron { transition: transform .3s; font-size: 12px; }
+  .settings-panel:not(.collapsed) .chevron { transform: rotate(180deg); }
+  .settings-body { padding: 20px; display: grid; gap: 16px; }
+  .settings-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media(max-width:600px) { .settings-row { grid-template-columns: 1fr; } }
+
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field label { font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .5px; }
+  .field input, .field select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 13px;
+    padding: 9px 12px;
+    outline: none;
+    transition: border-color .2s;
+    width: 100%;
+    font-family: 'Courier New', monospace;
+  }
+  .field input:focus, .field select:focus { border-color: var(--accent); }
+  .field .hint { font-size: 11px; color: var(--muted); }
+  .field .hint a { color: var(--accent2); text-decoration: none; }
+  .field .hint a:hover { text-decoration: underline; }
+
+  .settings-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* ── Tabs ── */
+  .tabs { display: flex; gap: 4px; background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 4px; margin-bottom: 20px; }
+  .tab {
+    flex: 1; padding: 9px 16px; border: none; background: transparent;
+    color: var(--muted); cursor: pointer; border-radius: 7px; font-size: 13px;
+    font-weight: 600; transition: all .2s;
+  }
+  .tab.active { background: var(--accent); color: white; }
+  .tab:hover:not(.active) { color: var(--text); background: var(--bg3); }
+
+  /* ── Search area ── */
+  .search-box {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 20px; margin-bottom: 24px;
+  }
+  .search-box h2 { font-size: 15px; margin-bottom: 14px; color: var(--accent2); }
+  .input-row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .input-row input, .input-row select {
+    background: var(--bg);
+    border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); font-size: 14px; padding: 10px 14px;
+    outline: none; transition: border-color .2s;
+  }
+  .input-row input:focus, .input-row select:focus { border-color: var(--accent); }
+  .input-row input.main-input { flex: 1; min-width: 200px; }
+  .btn {
+    padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer;
+    font-size: 13px; font-weight: 600; transition: all .2s; white-space: nowrap;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .btn-primary { background: var(--accent); color: white; }
+  .btn-primary:hover { background: var(--accent2); }
+  .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-secondary { background: var(--bg3); border: 1px solid var(--border); color: var(--text); }
+  .btn-secondary:hover { background: var(--border); }
+  .btn-sm { padding: 6px 12px; font-size: 12px; }
+  .scan-options { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; align-items: center; }
+  .scan-options label { display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
+  .scan-options input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; }
+  .scan-options input[type=number] {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); font-size: 13px; padding: 4px 8px; width: 80px; outline: none;
+  }
+
+  /* ── Status / Log ── */
+  .status-bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border-radius: 8px; margin-bottom: 16px;
+    font-size: 13px; background: var(--bg2); border: 1px solid var(--border);
+  }
+  .status-bar.loading { border-color: var(--accent); }
+  .status-bar.error { border-color: var(--red); background: #1a0a0a; }
+  .status-bar.success { border-color: var(--green); background: #0a1a0f; }
+  .status-bar.warn { border-color: var(--yellow); background: #1a160a; }
+  .spinner {
+    width: 16px; height: 16px; border: 2px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%;
+    animation: spin .7s linear infinite; flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Results ── */
+  .results-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 14px; flex-wrap: wrap; gap: 8px;
+  }
+  .results-header h2 { font-size: 15px; color: var(--accent2); }
+  .results-actions { display: flex; gap: 8px; }
+  .sort-select {
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); font-size: 12px; padding: 5px 10px; outline: none;
+  }
+
+  /* Table */
+  .table-wrap { overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead { background: var(--bg3); }
+  th {
+    padding: 11px 14px; text-align: left; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .5px; color: var(--muted); font-weight: 700; white-space: nowrap;
+    cursor: pointer; user-select: none;
+  }
+  th:hover { color: var(--text); }
+  th.sort-asc::after { content: ' ↑'; }
+  th.sort-desc::after { content: ' ↓'; }
+  tbody tr { border-top: 1px solid var(--border); transition: background .15s; }
+  tbody tr:hover { background: var(--bg3); }
+  td { padding: 10px 14px; vertical-align: middle; }
+  .td-name { font-weight: 600; }
+  .td-name small { display: block; font-size: 11px; color: var(--muted); font-weight: 400; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 600;
+  }
+  .badge-green { background: rgba(76,175,110,.15); color: var(--green); }
+  .badge-yellow { background: rgba(240,192,64,.15); color: var(--yellow); }
+  .badge-purple { background: rgba(123,94,167,.15); color: var(--accent2); }
+  .badge-red { background: rgba(224,80,80,.12); color: var(--red); }
+  .tag-sale { background: rgba(76,175,110,.12); color: var(--green); border-radius: 5px; padding: 2px 7px; font-size: 11px; }
+  .tag-nosale { background: var(--bg3); color: var(--muted); border-radius: 5px; padding: 2px 7px; font-size: 11px; }
+  .power-cell { white-space: nowrap; }
+  .power-real { color: var(--cyan); font-weight: 700; }
+  .power-base { color: var(--muted); font-size: 12px; }
+  .upgrade-plus { color: var(--green); font-weight: 700; }
+  .upgrade-zero { color: var(--muted); }
+  .price-ton { color: var(--yellow); font-weight: 700; }
+  .value-th { color: #c084fc; font-weight: 700; }
+  .muted { color: var(--muted); }
+
+  /* Single miner card */
+  .miner-card {
+    background: var(--card-bg); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 24px;
+    display: grid; gap: 20px;
+  }
+  .miner-card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .miner-card-title { font-size: 20px; font-weight: 700; }
+  .miner-card-sub { font-size: 13px; color: var(--muted); margin-top: 4px; }
+  .miner-card-address { font-family: monospace; font-size: 11px; color: var(--muted); word-break: break-all; }
+  .miner-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+  .stat-card {
+    background: var(--bg3); border: 1px solid var(--border); border-radius: 10px; padding: 14px;
+  }
+  .stat-card .stat-label { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin-bottom: 6px; }
+  .stat-card .stat-value { font-size: 22px; font-weight: 800; }
+  .stat-card .stat-sub { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .stat-blue .stat-value { color: var(--cyan); }
+  .stat-green .stat-value { color: var(--green); }
+  .stat-yellow .stat-value { color: var(--yellow); }
+  .stat-purple .stat-value { color: var(--accent2); }
+
+  /* Notice */
+  .notice {
+    padding: 12px 16px; border-radius: 8px; font-size: 13px;
+    display: flex; align-items: flex-start; gap: 10px;
+    background: rgba(123,94,167,.1); border: 1px solid rgba(123,94,167,.3);
+  }
+  .notice-warn { background: rgba(240,192,64,.08); border-color: rgba(240,192,64,.3); }
+  .notice-icon { flex-shrink: 0; font-size: 16px; margin-top: 1px; }
+
+  /* Empty state */
+  .empty { text-align: center; padding: 60px 20px; color: var(--muted); }
+  .empty .empty-icon { font-size: 48px; margin-bottom: 12px; }
+  .empty p { max-width: 360px; margin: 0 auto; }
+
+  /* Export */
+  .export-btn { display: flex; align-items: center; gap: 6px; }
+
+  /* Progress bar */
+  .progress-wrap { margin-top: 8px; }
+  .progress-bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+  .progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 2px; transition: width .3s; }
+  .progress-text { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+  .hidden { display: none !important; }
+  .divider { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
+
+  /* Token saved indicator */
+  .token-saved { color: var(--green); font-size: 12px; display: flex; align-items: center; gap: 4px; }
+
+  /* Responsive */
+  @media(max-width: 700px) {
+    .miner-stats { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">⛏️</div>
+    GoMining <span>Parser</span>
+  </div>
+  <div class="header-actions">
+    <button class="btn-icon" onclick="toggleSettings()" title="Настройки">⚙️</button>
+    <button class="btn-icon" onclick="exportCSV()" title="Экспорт CSV">📥</button>
+  </div>
+</header>
+
+<div class="container">
+
+  <!-- Settings Panel -->
+  <div class="settings-panel collapsed" id="settingsPanel">
+    <div class="settings-header" onclick="toggleSettings()">
+      <h3>⚙️ Настройки API</h3>
+      <span class="chevron">▼</span>
+    </div>
+    <div class="settings-body">
+      <div class="settings-row">
+        <div class="field">
+          <label>GoMining JWT Token <span id="tokenStatus"></span></label>
+          <input type="password" id="tokenInput" placeholder="eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9..." autocomplete="off">
+          <div class="hint">
+            Нужен для получения <b>реальной мощности</b> (с апгрейдами).
+            <a href="get_token.md" target="_blank">Как получить →</a>
+            Откройте nft.gomining.com → DevTools (F12) → Network → любой /api/ запрос → заголовок Authorization.
+          </div>
+        </div>
+        <div class="field">
+          <label>tonapi.io API Key (опционально)</label>
+          <input type="password" id="tonapiKeyInput" placeholder="Бесплатный ключ на tonapi.io" autocomplete="off">
+          <div class="hint">Улучшает получение on-chain данных NFT. Без ключа работает с лимитами.</div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>CORS Proxy (если API блокирует браузерные запросы)</label>
+        <input type="text" id="corsProxyInput" placeholder="https://corsproxy.io/? (оставьте пустым для прямых запросов)">
+        <div class="hint">
+          Если GoMining API возвращает ошибку CORS — вставьте адрес прокси.
+          Пример: <code>https://corsproxy.io/?</code> (бесплатный, без гарантий).
+        </div>
+      </div>
+
+      <div class="settings-actions">
+        <button class="btn btn-primary btn-sm" onclick="saveSettings()">💾 Сохранить</button>
+        <button class="btn btn-secondary btn-sm" onclick="clearSettings()">🗑️ Очистить токены</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('single')" id="tab-single">🔍 Майнер по ID</button>
+    <button class="tab" onclick="switchTab('list')" id="tab-list">📋 Список ID</button>
+    <button class="tab" onclick="switchTab('scan')" id="tab-scan">🛒 Сканировать маркетплейс</button>
+  </div>
+
+  <!-- Tab: Single / List miner lookup -->
+  <div id="pane-single">
+    <div class="search-box">
+      <h2>Проверить майнер по номеру</h2>
+      <div class="input-row">
+        <select id="singleCollection">
+          <option value="auto">Авто (по номеру)</option>
+          <option value="GoMining Digital Miners">Release 1</option>
+          <option value="GoMining Digital Miners: Release 2">Release 2</option>
+        </select>
+        <input type="number" class="main-input" id="singleId" placeholder="Номер майнера, напр. 349973" min="1">
+        <button class="btn btn-primary" onclick="lookupSingle()" id="btnSingle">🔍 Найти</button>
+      </div>
+    </div>
+    <div id="singleStatus" class="hidden"></div>
+    <div id="singleResult"></div>
+  </div>
+
+  <!-- Tab: List -->
+  <div id="pane-list" class="hidden">
+    <div class="search-box">
+      <h2>Проверить список майнеров</h2>
+      <div class="input-row" style="flex-direction:column; align-items:stretch;">
+        <textarea id="listIds" rows="5" style="
+          background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+          color: var(--text); font-size: 13px; padding: 10px 14px; resize: vertical;
+          font-family: monospace; outline: none;
+        " placeholder="Введите номера майнеров — по одному на строке или через запятую:&#10;349973&#10;100001&#10;200050, 300100"></textarea>
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+          <select id="listCollection">
+            <option value="auto">Авто (по номеру)</option>
+            <option value="GoMining Digital Miners">Release 1</option>
+            <option value="GoMining Digital Miners: Release 2">Release 2</option>
+          </select>
+          <input type="number" id="listWorkers" value="5" min="1" max="20" style="width:70px; background:var(--bg); border:1px solid var(--border); border-radius:8px; color:var(--text); font-size:13px; padding:9px 12px; outline:none;">
+          <label style="display:flex; align-items:center; gap:6px; font-size:13px;">параллельных запросов</label>
+          <button class="btn btn-primary" onclick="lookupList()" id="btnList">🔍 Загрузить</button>
+        </div>
+      </div>
+    </div>
+    <div id="listStatus" class="hidden"></div>
+    <div id="listResult"></div>
+  </div>
+
+  <!-- Tab: Scan -->
+  <div id="pane-scan" class="hidden">
+    <div class="search-box">
+      <h2>Сканировать листинги маркетплейса</h2>
+      <div class="input-row">
+        <select id="scanCollection">
+          <option value="both">Обе коллекции</option>
+          <option value="GoMining Digital Miners">Release 1</option>
+          <option value="GoMining Digital Miners: Release 2" selected>Release 2</option>
+        </select>
+        <button class="btn btn-primary" onclick="scanMarketplace()" id="btnScan">🛒 Сканировать</button>
+      </div>
+      <div class="scan-options">
+        <label>
+          <input type="checkbox" id="scanUpgradedOnly">
+          Только апгрейднутые (real &gt; baseline)
+        </label>
+        <label>Макс. листингов:
+          <input type="number" id="scanMax" value="200" min="10" max="2000">
+        </label>
+        <label>Мин. мощность (TH):
+          <input type="number" id="scanMinPower" value="" min="0" step="0.1" placeholder="любая">
+        </label>
+        <label>Макс. цена (TON):
+          <input type="number" id="scanMaxPrice" value="" min="0" placeholder="любая">
+        </label>
+      </div>
+    </div>
+    <div id="scanStatus" class="hidden"></div>
+    <div id="scanResult"></div>
+  </div>
+
+</div><!-- /container -->
+
+<script>
+// ──────────────────────────────────────────────────────────────────────────────
+// CONFIG
+// ──────────────────────────────────────────────────────────────────────────────
+
+const COLLECTIONS = {
+  "GoMining Digital Miners":           "EQBY-QwusK_kNxUy2F7LpPa7-e8XKEskLedb6fXzJ6n9JjWD",
+  "GoMining Digital Miners: Release 2":"EQBykWvdmoyFD2kB4BJbdrxRqyWKzSLDn-SgwNvznRfbsaKv",
+};
+
+const GETGEMS_GQL   = "https://api.getgems.io/graphql";
+const TONAPI_BASE   = "https://tonapi.io/v2";
+const GOMINING_API  = "https://nft.gomining.com/api";
+const NANOTON       = 1_000_000_000;
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SETTINGS
+// ──────────────────────────────────────────────────────────────────────────────
+
+function getSettings() {
+  return {
+    token:     localStorage.getItem("gm_token")      || "",
+    tonapiKey: localStorage.getItem("gm_tonapi_key") || "",
+    corsProxy: localStorage.getItem("gm_cors_proxy") || "",
+  };
+}
+
+function saveSettings() {
+  const token     = document.getElementById("tokenInput").value.trim();
+  const tonapiKey = document.getElementById("tonapiKeyInput").value.trim();
+  const corsProxy = document.getElementById("corsProxyInput").value.trim();
+  if (token)     localStorage.setItem("gm_token", token);
+  else           localStorage.removeItem("gm_token");
+  if (tonapiKey) localStorage.setItem("gm_tonapi_key", tonapiKey);
+  else           localStorage.removeItem("gm_tonapi_key");
+  if (corsProxy) localStorage.setItem("gm_cors_proxy", corsProxy);
+  else           localStorage.removeItem("gm_cors_proxy");
+  updateTokenStatus();
+  showToast("✅ Настройки сохранены");
+}
+
+function clearSettings() {
+  localStorage.removeItem("gm_token");
+  localStorage.removeItem("gm_tonapi_key");
+  localStorage.removeItem("gm_cors_proxy");
+  document.getElementById("tokenInput").value = "";
+  document.getElementById("tonapiKeyInput").value = "";
+  document.getElementById("corsProxyInput").value = "";
+  updateTokenStatus();
+  showToast("🗑️ Токены удалены");
+}
+
+function updateTokenStatus() {
+  const s = getSettings();
+  const el = document.getElementById("tokenStatus");
+  el.innerHTML = s.token ? '<span class="token-saved">✓ сохранён</span>' : '';
+}
+
+function loadSettingsUI() {
+  const s = getSettings();
+  if (s.token)     document.getElementById("tokenInput").value     = s.token;
+  if (s.tonapiKey) document.getElementById("tonapiKeyInput").value = s.tonapiKey;
+  if (s.corsProxy) document.getElementById("corsProxyInput").value = s.corsProxy;
+  updateTokenStatus();
+}
+
+function toggleSettings() {
+  document.getElementById("settingsPanel").classList.toggle("collapsed");
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// TABS
+// ──────────────────────────────────────────────────────────────────────────────
+
+function switchTab(name) {
+  ["single","list","scan"].forEach(t => {
+    document.getElementById(`pane-${t}`).classList.toggle("hidden", t !== name);
+    document.getElementById(`tab-${t}`).classList.toggle("active", t === name);
+  });
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// API HELPERS
+// ──────────────────────────────────────────────────────────────────────────────
+
+function proxyUrl(url) {
+  const proxy = getSettings().corsProxy.trim();
+  return proxy ? proxy + encodeURIComponent(url) : url;
+}
+
+async function gqlPost(query, variables) {
+  const resp = await fetch(GETGEMS_GQL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, variables }),
+  });
+  if (!resp.ok) throw new Error(`getgems HTTP ${resp.status}`);
+  const data = await resp.json();
+  if (data.errors) throw new Error(data.errors.map(e => e.message).join("; "));
+  return data.data;
+}
+
+async function tonapiGet(path, params = {}) {
+  const s = getSettings();
+  const url = new URL(`${TONAPI_BASE}${path}`);
+  Object.entries(params).forEach(([k,v]) => url.searchParams.set(k, v));
+  const headers = { "Accept": "application/json" };
+  if (s.tonapiKey) headers["Authorization"] = `Bearer ${s.tonapiKey}`;
+  const resp = await fetch(url.toString(), { headers });
+  if (!resp.ok) throw new Error(`tonapi HTTP ${resp.status}`);
+  return resp.json();
+}
+
+async function gmGet(path, params = {}) {
+  const s = getSettings();
+  if (!s.token) return null;
+  const url = new URL(`${GOMINING_API}${path}`);
+  Object.entries(params).forEach(([k,v]) => url.searchParams.set(k, v));
+  const finalUrl = proxyUrl(url.toString());
+  try {
+    const resp = await fetch(finalUrl, {
+      headers: {
+        "Authorization": `Bearer ${s.token}`,
+        "Content-Type": "application/json",
+      },
+    });
+    if (resp.status === 401) throw new Error("401: Токен недействителен или истёк");
+    if (!resp.ok) return null;
+    return resp.json();
+  } catch(e) {
+    if (e.message.includes("401")) throw e;
+    return null; // CORS or network error — silent fail
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// GRAPHQL QUERIES
+// ──────────────────────────────────────────────────────────────────────────────
+
+const GQL_ITEM_BY_INDEX = `
+query NftItemByIndex($collectionAddress: String!, $index: String!) {
+  alphaNftItemByIndex(collectionAddress: $collectionAddress, itemIndex: $index) {
+    address index name
+    attributes { key value }
+    sale {
+      ... on NftSaleFix { fullPrice }
+    }
+  }
+}`;
+
+const GQL_SALES = `
+query NftSales($collectionAddress: String!, $count: Int!, $cursor: String) {
+  nftSearch(
+    collections: [$collectionAddress]
+    count: $count
+    cursor: $cursor
+    filters: { saleType: FIX_PRICE }
+    sort: { field: PRICE, asc: true }
+  ) {
+    cursor
+    items {
+      ... on NftItem {
+        address index name
+        attributes { key value }
+        sale {
+          ... on NftSaleFix { fullPrice }
+        }
+      }
+    }
+  }
+}`;
+
+// ──────────────────────────────────────────────────────────────────────────────
+// DATA HELPERS
+// ──────────────────────────────────────────────────────────────────────────────
+
+function guessCollection(index) {
+  return index <= 2500
+    ? "GoMining Digital Miners"
+    : "GoMining Digital Miners: Release 2";
+}
+
+function parseAttrs(attributes = []) {
+  const map = {};
+  for (const a of attributes) {
+    const key = String(a.key || "").toUpperCase().replace(/\s+/g, "_");
+    map[key] = a.value;
+  }
+  return map;
+}
+
+function parseBaselinePower(attrs) {
+  for (const k of ["BASELINE_POWER","POWER","HASHRATE","COMPUTING_POWER"]) {
+    if (attrs[k] !== undefined) {
+      const v = parseFloat(attrs[k]);
+      if (!isNaN(v)) return v;
+    }
+  }
+  return null;
+}
+
+function parseEfficiency(attrs) {
+  for (const k of ["ENERGY_EFFICIENCY","EFFICIENCY","W/TH","WTH"]) {
+    if (attrs[k] !== undefined) {
+      const v = parseFloat(attrs[k]);
+      if (!isNaN(v)) return v;
+    }
+  }
+  return null;
+}
+
+function parsePriceTon(item) {
+  const price = item?.sale?.fullPrice;
+  if (price) {
+    const v = parseFloat(price) / NANOTON;
+    if (!isNaN(v) && v > 0) return v;
+  }
+  return null;
+}
+
+function parseGmPower(data) {
+  if (!data) return null;
+  const keys = ["power","hashrate","computing_power","computingPower","currentPower","current_power","th","ths","total_power","totalPower"];
+  for (const k of keys) {
+    if (data[k] !== undefined) { const v = parseFloat(data[k]); if (!isNaN(v)) return v; }
+  }
+  for (const sub of ["stats","attributes","data","miner"]) {
+    if (data[sub] && typeof data[sub] === "object") {
+      const v = parseGmPower(data[sub]);
+      if (v !== null) return v;
+    }
+  }
+  return null;
+}
+
+function parseGmEfficiency(data) {
+  if (!data) return null;
+  const keys = ["efficiency","energy_efficiency","energyEfficiency","wth","w_per_th","wPerTh"];
+  for (const k of keys) {
+    if (data[k] !== undefined) { const v = parseFloat(data[k]); if (!isNaN(v)) return v; }
+  }
+  for (const sub of ["stats","attributes","data","miner"]) {
+    if (data[sub] && typeof data[sub] === "object") {
+      const v = parseGmEfficiency(data[sub]);
+      if (v !== null) return v;
+    }
+  }
+  return null;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// FETCH SINGLE MINER
+// ──────────────────────────────────────────────────────────────────────────────
+
+async function fetchMiner(index, collectionName) {
+  const colName   = collectionName || guessCollection(index);
+  const colAddr   = COLLECTIONS[colName];
+
+  const miner = {
+    index, collectionName: colName, collectionAddr: colAddr,
+    name: null, address: null,
+    baselinePower: null, realPower: null,
+    baselineEff: null, realEff: null,
+    priceTon: null, isOnSale: false,
+    dataSource: [],
+  };
+
+  // 1. getgems
+  try {
+    const data = await gqlPost(GQL_ITEM_BY_INDEX, {
+      collectionAddress: colAddr, index: String(index),
+    });
+    const item = data?.alphaNftItemByIndex || data?.nftItemByIndex;
+    if (item) {
+      miner.address   = item.address || null;
+      miner.name      = item.name || `#${index}`;
+      miner.isOnSale  = !!item.sale;
+      miner.priceTon  = parsePriceTon(item);
+      const attrs     = parseAttrs(item.attributes);
+      miner.baselinePower = parseBaselinePower(attrs);
+      miner.baselineEff   = parseEfficiency(attrs);
+      miner.dataSource.push("getgems");
+    }
+  } catch(e) {
+    miner.dataSource.push(`getgems:err(${e.message.substring(0,40)})`);
+  }
+
+  // 2. GoMining API (real power)
+  try {
+    let gmData = await gmGet(`/miners/${index}`);
+    if (!gmData && miner.address) {
+      gmData = await gmGet(`/nfts/by-address/${miner.address}`);
+    }
+    if (gmData) {
+      miner.realPower = parseGmPower(gmData);
+      miner.realEff   = parseGmEfficiency(gmData);
+      miner.dataSource.push("gomining");
+    }
+  } catch(e) {
+    if (e.message.includes("401")) throw e;
+  }
+
+  miner.name = miner.name || `#${index}`;
+  return miner;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// FETCH ALL SALES (PAGINATED)
+// ──────────────────────────────────────────────────────────────────────────────
+
+async function fetchCollectionSales(colName, maxItems, onProgress) {
+  const colAddr = COLLECTIONS[colName];
+  const items = [];
+  let cursor = null;
+  let errorCount = 0;
+
+  while (items.length < maxItems) {
+    const batch = Math.min(200, maxItems - items.length);
+    try {
+      const data = await gqlPost(GQL_SALES, {
+        collectionAddress: colAddr, count: batch, cursor,
+      });
+      const result = data?.nftSearch;
+      const page = result?.items || [];
+      cursor = result?.cursor || null;
+      items.push(...page);
+      onProgress(items.length, maxItems);
+      if (!cursor || page.length === 0) break;
+    } catch(e) {
+      errorCount++;
+      if (errorCount > 3) break;
+      await sleep(1000);
+    }
+  }
+  return items;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ENRICH WITH REAL POWER (concurrently, but rate-limited)
+// ──────────────────────────────────────────────────────────────────────────────
+
+async function enrichWithRealPower(miners, onProgress) {
+  if (!getSettings().token) return;
+  const CONCURRENCY = 8;
+  let done = 0;
+
+  async function processOne(miner) {
+    try {
+      let gmData = await gmGet(`/miners/${miner.index}`);
+      if (!gmData && miner.address) {
+        gmData = await gmGet(`/nfts/by-address/${miner.address}`);
+      }
+      if (gmData) {
+        miner.realPower = parseGmPower(gmData);
+        miner.realEff   = parseGmEfficiency(gmData);
+      }
+    } catch(e) {
+      if (e.message.includes("401")) throw e;
+    }
+    done++;
+    onProgress(done, miners.length);
+  }
+
+  // Process in batches of CONCURRENCY
+  for (let i = 0; i < miners.length; i += CONCURRENCY) {
+    const batch = miners.slice(i, i + CONCURRENCY);
+    await Promise.allSettled(batch.map(processOne));
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// METRICS
+// ──────────────────────────────────────────────────────────────────────────────
+
+function upgradeRatio(m) {
+  if (m.realPower && m.baselinePower && m.baselinePower > 0)
+    return m.realPower / m.baselinePower;
+  return null;
+}
+
+function thPerTon(m) {
+  const power = m.realPower ?? m.baselinePower;
+  if (power && m.priceTon && m.priceTon > 0) return power / m.priceTon;
+  return null;
+}
+
+function addedTh(m) {
+  if (m.realPower && m.baselinePower) return m.realPower - m.baselinePower;
+  return null;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// UI HELPERS
+// ──────────────────────────────────────────────────────────────────────────────
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function setStatus(containerId, type, html, progress = null) {
+  const el = document.getElementById(containerId);
+  el.className = `status-bar ${type}`;
+  el.classList.remove("hidden");
+  let inner = html;
+  if (type === "loading") inner = `<div class="spinner"></div>${html}`;
+  if (progress !== null) {
+    inner += `<div class="progress-wrap">
+      <div class="progress-bar"><div class="progress-fill" style="width:${Math.round(progress*100)}%"></div></div>
+      <div class="progress-text">${Math.round(progress*100)}%</div>
+    </div>`;
+  }
+  el.innerHTML = inner;
+}
+
+function hideStatus(id) { document.getElementById(id).classList.add("hidden"); }
+
+function showToast(msg) {
+  const t = document.createElement("div");
+  t.style.cssText = "position:fixed;bottom:24px;right:24px;background:#1a1a2e;border:1px solid var(--accent);color:var(--text);padding:10px 18px;border-radius:8px;z-index:999;font-size:13px;";
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 2500);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// RENDER SINGLE MINER CARD
+// ──────────────────────────────────────────────────────────────────────────────
+
+function renderSingleCard(m) {
+  const ratio   = upgradeRatio(m);
+  const val     = thPerTon(m);
+  const added   = addedTh(m);
+  const eff     = m.realEff ?? m.baselineEff;
+  const hasReal = m.realPower !== null;
+
+  const pctStr  = ratio ? `${ratio >= 1 ? "+" : ""}${((ratio-1)*100).toFixed(1)}%` : null;
+  const addedStr= added !== null ? `+${added.toFixed(3)} TH` : null;
+
+  return `<div class="miner-card">
+    <div class="miner-card-header">
+      <div>
+        <div class="miner-card-title">${esc(m.name)}</div>
+        <div class="miner-card-sub">${esc(m.collectionName)}</div>
+        ${m.address ? `<div class="miner-card-address" style="margin-top:8px">${esc(m.address)}</div>` : ""}
+      </div>
+      <div>${m.isOnSale ? '<span class="tag-sale">🟢 На продаже</span>' : '<span class="tag-nosale">Не выставлен</span>'}</div>
+    </div>
+
+    <div class="miner-stats">
+      <div class="stat-card ${hasReal ? "stat-blue" : ""}">
+        <div class="stat-label">${hasReal ? "Реальная мощность" : "Базовая мощность"}</div>
+        <div class="stat-value">${(m.realPower ?? m.baselinePower ?? "—")} <small style="font-size:14px">TH</small></div>
+        ${hasReal && m.baselinePower ? `<div class="stat-sub">Baseline: ${m.baselinePower} TH</div>` : ""}
+      </div>
+
+      ${added !== null ? `<div class="stat-card stat-green">
+        <div class="stat-label">Апгрейд</div>
+        <div class="stat-value">${addedStr}</div>
+        <div class="stat-sub">${pctStr} к базовой</div>
+      </div>` : (!hasReal && getSettings().token ? `<div class="stat-card">
+        <div class="stat-label">Апгрейд</div>
+        <div class="stat-value muted">—</div>
+        <div class="stat-sub">GoMining не вернул данные</div>
+      </div>` : "")}
+
+      ${m.priceTon !== null ? `<div class="stat-card stat-yellow">
+        <div class="stat-label">Цена</div>
+        <div class="stat-value">${m.priceTon.toFixed(2)} <small style="font-size:14px">TON</small></div>
+      </div>` : ""}
+
+      ${val !== null ? `<div class="stat-card stat-purple">
+        <div class="stat-label">TH / TON</div>
+        <div class="stat-value">${val.toFixed(4)}</div>
+        <div class="stat-sub">чем выше — тем выгоднее</div>
+      </div>` : ""}
+
+      ${eff !== null ? `<div class="stat-card">
+        <div class="stat-label">Эффективность</div>
+        <div class="stat-value">${eff.toFixed(1)} <small style="font-size:14px">W/TH</small></div>
+      </div>` : ""}
+    </div>
+
+    ${!getSettings().token ? `<div class="notice notice-warn">
+      <span class="notice-icon">⚠️</span>
+      <div>Токен GoMining не задан — реальная мощность (с апгрейдами) не запрашивается.
+        <a href="#" onclick="toggleSettings(); return false;" style="color:var(--accent2)">Добавить токен →</a></div>
+    </div>` : ""}
+
+    <div style="font-size:11px; color:var(--muted)">Источники данных: ${m.dataSource.join(", ") || "нет"}</div>
+  </div>`;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// RENDER TABLE
+// ──────────────────────────────────────────────────────────────────────────────
+
+let currentMiners = [];
+let sortCol = "th_per_ton";
+let sortAsc = false;
+
+function renderTable(miners, containerId) {
+  currentMiners = miners;
+  const container = document.getElementById(containerId);
+
+  if (!miners.length) {
+    container.innerHTML = `<div class="empty">
+      <div class="empty-icon">🔍</div>
+      <p>Майнеры не найдены или нет листингов по выбранным фильтрам</p>
+    </div>`;
+    return;
+  }
+
+  const hasReal = miners.some(m => m.realPower !== null);
+  const hasPrices = miners.some(m => m.priceTon !== null);
+
+  const sortedMiners = sortMiners(miners);
+
+  const rows = sortedMiners.map(m => {
+    const ratio  = upgradeRatio(m);
+    const val    = thPerTon(m);
+    const added  = addedTh(m);
+    const eff    = m.realEff ?? m.baselineEff;
+
+    const pctColor = ratio > 1.001 ? "upgrade-plus" : "upgrade-zero";
+    const pctStr   = ratio ? `<span class="${pctColor}">${((ratio-1)*100).toFixed(1)}%</span>` : '<span class="muted">—</span>';
+    const addedStr = added !== null ? `<span class="upgrade-plus">+${added.toFixed(3)}</span>` : '<span class="muted">—</span>';
+
+    return `<tr onclick="window.open('https://getgems.io/nft/${m.address || ''}','_blank')" style="cursor:pointer">
+      <td class="td-name">
+        ${esc(m.name || `#${m.index}`)}
+        <small>${esc(m.collectionName?.includes("Release 2") ? "R2" : "R1")}</small>
+      </td>
+      <td class="power-cell">
+        ${m.baselinePower !== null ? `<span class="power-base">${m.baselinePower} TH</span>` : '<span class="muted">—</span>'}
+      </td>
+      ${hasReal ? `<td class="power-cell">
+        ${m.realPower !== null ? `<span class="power-real">${m.realPower.toFixed(3)} TH</span>` : '<span class="muted">—</span>'}
+      </td>
+      <td>${addedStr}<br>${pctStr}</td>` : ""}
+      ${hasPrices ? `<td>
+        ${m.priceTon !== null ? `<span class="price-ton">${m.priceTon.toFixed(2)}</span>` : '<span class="muted">—</span>'}
+      </td>
+      <td>
+        ${val !== null ? `<span class="value-th">${val.toFixed(4)}</span>` : '<span class="muted">—</span>'}
+      </td>` : ""}
+      <td>${eff !== null ? `${eff.toFixed(1)} W/TH` : '<span class="muted">—</span>'}</td>
+      <td>${m.isOnSale ? '<span class="tag-sale">✓</span>' : '<span class="tag-nosale">✗</span>'}</td>
+    </tr>`;
+  }).join("");
+
+  container.innerHTML = `
+    <div class="results-header">
+      <h2>Результаты: ${miners.length} майнеров</h2>
+      <div class="results-actions">
+        <select class="sort-select" onchange="changeSortUI(this.value)">
+          <option value="th_per_ton" ${sortCol==="th_per_ton"?"selected":""}>Сортировка: TH/TON ↓</option>
+          <option value="upgrade" ${sortCol==="upgrade"?"selected":""}>Апгрейд ↓</option>
+          <option value="power" ${sortCol==="power"?"selected":""}>Мощность ↓</option>
+          <option value="price" ${sortCol==="price"?"selected":""}>Цена ↑</option>
+          <option value="index" ${sortCol==="index"?"selected":""}>Номер ↑</option>
+        </select>
+        <button class="btn btn-secondary btn-sm export-btn" onclick="exportCSV()">📥 CSV</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th onclick="toggleSort('name')">Майнер</th>
+            <th onclick="toggleSort('baseline')">Baseline</th>
+            ${hasReal ? `<th onclick="toggleSort('power')">Реальная мощность</th>
+            <th onclick="toggleSort('upgrade')">Апгрейд</th>` : ""}
+            ${hasPrices ? `<th onclick="toggleSort('price')">Цена (TON)</th>
+            <th onclick="toggleSort('th_per_ton')">TH/TON ⬆</th>` : ""}
+            <th>Эффект.</th>
+            <th>Продажа</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    ${!getSettings().token ? `<div class="notice notice-warn" style="margin-top:14px">
+      <span class="notice-icon">⚠️</span>
+      <div>Без токена GoMining колонка «Реальная мощность» недоступна — показываются только базовые значения из NFT-атрибутов.
+        <a href="#" onclick="toggleSettings(); return false;" style="color:var(--accent2)">Добавить токен →</a></div>
+    </div>` : ""}
+  `;
+}
+
+function sortMiners(miners) {
+  const copy = [...miners];
+  copy.sort((a, b) => {
+    let va, vb;
+    if      (sortCol === "th_per_ton") { va = thPerTon(a) ?? -999; vb = thPerTon(b) ?? -999; }
+    else if (sortCol === "upgrade")    { va = upgradeRatio(a) ?? 0; vb = upgradeRatio(b) ?? 0; }
+    else if (sortCol === "power")      { va = (a.realPower ?? a.baselinePower ?? 0); vb = (b.realPower ?? b.baselinePower ?? 0); }
+    else if (sortCol === "price")      { va = a.priceTon ?? 999999; vb = b.priceTon ?? 999999; }
+    else if (sortCol === "baseline")   { va = a.baselinePower ?? 0; vb = b.baselinePower ?? 0; }
+    else if (sortCol === "index")      { va = a.index; vb = b.index; }
+    else if (sortCol === "name")       { va = a.name || ""; vb = b.name || ""; return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va); }
+    else                               { va = 0; vb = 0; }
+    return sortAsc ? va - vb : vb - va;
+  });
+  return copy;
+}
+
+function toggleSort(col) {
+  if (sortCol === col) sortAsc = !sortAsc;
+  else { sortCol = col; sortAsc = ["price","index","name"].includes(col); }
+}
+
+function changeSortUI(val) {
+  sortCol = val;
+  sortAsc = ["price","index"].includes(val);
+  // Re-render current miners into whichever tab is active
+  const activeResult = document.querySelector('[id$="Result"]:not(.hidden)');
+  if (activeResult && currentMiners.length) {
+    renderTable(currentMiners, activeResult.id);
+  }
+}
+
+function esc(s) {
+  return String(s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ACTIONS
+// ──────────────────────────────────────────────────────────────────────────────
+
+async function lookupSingle() {
+  const indexStr = document.getElementById("singleId").value.trim();
+  if (!indexStr) return alert("Введите номер майнера");
+  const index = parseInt(indexStr);
+  if (isNaN(index) || index < 1) return alert("Введите корректный номер");
+  const col = document.getElementById("singleCollection").value;
+  const colName = col === "auto" ? null : col;
+
+  document.getElementById("btnSingle").disabled = true;
+  setStatus("singleStatus", "loading", `Запрашиваем данные для майнера #${index}...`);
+  document.getElementById("singleResult").innerHTML = "";
+
+  try {
+    const miner = await fetchMiner(index, colName);
+    hideStatus("singleStatus");
+    document.getElementById("singleResult").innerHTML = renderSingleCard(miner);
+  } catch(e) {
+    if (e.message.includes("401")) {
+      setStatus("singleStatus", "error", "❌ Токен GoMining недействителен или истёк. Обновите токен в настройках.");
+    } else {
+      setStatus("singleStatus", "error", `❌ Ошибка: ${esc(e.message)}`);
+    }
+  } finally {
+    document.getElementById("btnSingle").disabled = false;
+  }
+}
+
+async function lookupList() {
+  const raw = document.getElementById("listIds").value;
+  const col = document.getElementById("listCollection").value;
+  const workers = parseInt(document.getElementById("listWorkers").value) || 5;
+
+  const ids = [...new Set(
+    raw.split(/[\n,\s]+/).map(s => parseInt(s.trim())).filter(n => !isNaN(n) && n > 0)
+  )];
+
+  if (!ids.length) return alert("Введите хотя бы один номер майнера");
+
+  document.getElementById("btnList").disabled = true;
+  setStatus("listStatus", "loading", `Запрашиваем ${ids.length} майнеров...`, 0);
+  document.getElementById("listResult").innerHTML = "";
+
+  const miners = [];
+  let done = 0;
+  const BATCH = Math.min(workers, 10);
+
+  try {
+    for (let i = 0; i < ids.length; i += BATCH) {
+      const batch = ids.slice(i, i + BATCH);
+      const results = await Promise.allSettled(
+        batch.map(id => fetchMiner(id, col === "auto" ? null : col))
+      );
+      for (const r of results) {
+        miners.push(r.status === "fulfilled" ? r.value : { index: batch[results.indexOf(r)], name: null, error: r.reason?.message });
+        done++;
+      }
+      setStatus("listStatus", "loading", `Загружено ${done} из ${ids.length}...`, done / ids.length);
+    }
+
+    hideStatus("listStatus");
+    renderTable(miners, "listResult");
+  } catch(e) {
+    setStatus("listStatus", "error", `❌ Ошибка: ${esc(e.message)}`);
+  } finally {
+    document.getElementById("btnList").disabled = false;
+  }
+}
+
+async function scanMarketplace() {
+  const colVal = document.getElementById("scanCollection").value;
+  const maxItems = parseInt(document.getElementById("scanMax").value) || 200;
+  const upgradedOnly = document.getElementById("scanUpgradedOnly").checked;
+  const minPower = parseFloat(document.getElementById("scanMinPower").value) || null;
+  const maxPrice = parseFloat(document.getElementById("scanMaxPrice").value) || null;
+
+  const collections = colVal === "both" ? Object.keys(COLLECTIONS) : [colVal];
+
+  document.getElementById("btnScan").disabled = true;
+  setStatus("scanStatus", "loading", "Загружаем листинги с маркетплейса...", 0);
+  document.getElementById("scanResult").innerHTML = "";
+
+  const allMiners = [];
+
+  try {
+    for (const col of collections) {
+      setStatus("scanStatus", "loading", `Сканируем ${col}...`, allMiners.length / (maxItems * collections.length));
+
+      const rawItems = await fetchCollectionSales(col, maxItems, (done, total) => {
+        setStatus("scanStatus", "loading", `${col}: получено ${done} листингов...`, done / total);
+      });
+
+      const miners = rawItems.map(item => {
+        const index = parseInt(item.index);
+        const attrs = parseAttrs(item.attributes || []);
+        return {
+          index:          isNaN(index) ? 0 : index,
+          collectionName: col,
+          name:           item.name || `#${index}`,
+          address:        item.address || null,
+          isOnSale:       true,
+          priceTon:       parsePriceTon(item),
+          baselinePower:  parseBaselinePower(attrs),
+          realPower:      null,
+          baselineEff:    parseEfficiency(attrs),
+          realEff:        null,
+          dataSource:     ["getgems"],
+        };
+      }).filter(m => m.index > 0);
+
+      allMiners.push(...miners);
+    }
+
+    // Enrich with real power if token available
+    if (getSettings().token && allMiners.length > 0) {
+      let enrichDone = 0;
+      setStatus("scanStatus", "loading", `Получаем реальную мощность (${allMiners.length} майнеров)...`, 0);
+      await enrichWithRealPower(allMiners, (done, total) => {
+        enrichDone = done;
+        setStatus("scanStatus", "loading", `GoMining API: ${done}/${total} майнеров...`, done / total);
+      });
+    }
+
+    // Apply filters
+    let filtered = allMiners;
+    if (upgradedOnly) filtered = filtered.filter(m => {
+      const r = upgradeRatio(m);
+      return r !== null && r > 1.001;
+    });
+    if (minPower !== null) filtered = filtered.filter(m => {
+      const p = m.realPower ?? m.baselinePower ?? 0;
+      return p >= minPower;
+    });
+    if (maxPrice !== null) filtered = filtered.filter(m => m.priceTon !== null && m.priceTon <= maxPrice);
+
+    if (filtered.length === 0 && allMiners.length > 0) {
+      setStatus("scanStatus", "warn", `⚠️ Загружено ${allMiners.length} листингов, но ни один не прошёл фильтры. Попробуйте изменить параметры.`);
+    } else {
+      hideStatus("scanStatus");
+    }
+
+    renderTable(filtered, "scanResult");
+
+  } catch(e) {
+    setStatus("scanStatus", "error", `❌ Ошибка: ${esc(e.message)}`);
+  } finally {
+    document.getElementById("btnScan").disabled = false;
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// EXPORT CSV
+// ──────────────────────────────────────────────────────────────────────────────
+
+function exportCSV() {
+  if (!currentMiners.length) return alert("Нет данных для экспорта");
+
+  const cols = [
+    "index","name","collection","address",
+    "baseline_power_th","real_power_th","added_th","upgrade_pct",
+    "price_ton","th_per_ton","efficiency_wth","is_on_sale",
+  ];
+
+  const rows = currentMiners.map(m => {
+    const ratio = upgradeRatio(m);
+    const val   = thPerTon(m);
+    const added = addedTh(m);
+    const eff   = m.realEff ?? m.baselineEff;
+    return [
+      m.index,
+      `"${(m.name||"").replace(/"/g,'""')}"`,
+      `"${(m.collectionName||"").replace(/"/g,'""')}"`,
+      m.address || "",
+      m.baselinePower ?? "",
+      m.realPower ?? "",
+      added !== null ? added.toFixed(4) : "",
+      ratio !== null ? ((ratio-1)*100).toFixed(2) : "",
+      m.priceTon !== null ? m.priceTon.toFixed(4) : "",
+      val !== null ? val.toFixed(6) : "",
+      eff !== null ? eff.toFixed(1) : "",
+      m.isOnSale ? "true" : "false",
+    ].join(",");
+  });
+
+  const csv = [cols.join(","), ...rows].join("\n");
+  const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href = url; a.download = `gomining_miners_${Date.now()}.csv`;
+  a.click(); URL.revokeObjectURL(url);
+  showToast(`📥 Экспортировано ${currentMiners.length} майнеров`);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// KEYBOARD SHORTCUTS
+// ──────────────────────────────────────────────────────────────────────────────
+
+document.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const active = document.querySelector(".tab.active")?.id;
+    if (active === "tab-single") lookupSingle();
+    else if (active === "tab-list") lookupList();
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// INIT
+// ──────────────────────────────────────────────────────────────────────────────
+
+loadSettingsUI();
+</script>
+</body>
+</html>
