@@ -342,33 +342,35 @@
 
   <!-- Tabs -->
   <div class="tabs">
-    <button class="tab active" onclick="switchTab('single')" id="tab-single">🔍 Майнер по ID</button>
-    <button class="tab" onclick="switchTab('list')" id="tab-list">📋 Список ID</button>
-    <button class="tab" onclick="switchTab('scan')" id="tab-scan">🛒 Сканировать маркетплейс</button>
+    <button class="tab active" onclick="switchTab('scan')" id="tab-scan">🛒 Сканировать маркетплейс</button>
+    <button class="tab" onclick="switchTab('single')" id="tab-single">🔍 Конкретный майнер</button>
+    <button class="tab" onclick="switchTab('list')" id="tab-list">📋 Список адресов</button>
   </div>
 
   <!-- Tab: Single / List miner lookup -->
-  <div id="pane-single">
+  <div id="pane-single" class="hidden">
     <div class="search-box">
-      <h2>Проверить майнер</h2>
+      <h2>Проверить конкретный майнер</h2>
+      <div style="background:rgba(255,200,0,0.08); border:1px solid rgba(255,200,0,0.25); border-radius:8px; padding:10px 14px; font-size:12px; color:var(--muted); margin-bottom:12px; line-height:1.6">
+        ⚠️ <b>Внимание:</b> GoMining показывает своё <i>внутреннее</i> число (tokenId), которое <b>не совпадает</b> с индексом NFT в блокчейне. Вводить просто число бессмысленно.<br>
+        Используй <b>URL из GoMining</b> или <b>адрес NFT</b>. Для поиска по рынку — вкладка "Сканировать маркетплейс".
+      </div>
       <div class="input-row">
         <input type="text" class="main-input" id="singleId" style="flex:1"
-          placeholder="URL GoMining / URL getgems / адрес EQ... / индекс в коллекции"
+          placeholder="URL GoMining (app.gomining.com/nft/…) или адрес EQ… из кошелька/getgems"
           onkeydown="if(event.key==='Enter')lookupSingle()">
         <button class="btn btn-primary" onclick="lookupSingle()" id="btnSingle">🔍 Найти</button>
       </div>
-      <div id="singleCollectionRow" style="margin-top:6px; font-size:12px; color:var(--muted)">
-        Если вводишь просто число — выбери коллекцию:
-        <select id="singleCollection" style="margin-left:6px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:12px; padding:3px 8px;">
-          <option value="GoMining Digital Miners: Release 2" selected>Release 2 (по умолчанию)</option>
-          <option value="GoMining Digital Miners">Release 1</option>
-        </select>
-      </div>
-      <div style="font-size:11px; color:var(--muted); margin-top:4px">
-        Примеры: <code>https://app.gomining.com/nft/acea4fac-…</code> или
-        <code>https://getgems.io/nft/EQBy.../5</code> или <code>EQBy...адрес</code> или <code>5</code>
+      <div style="font-size:11px; color:var(--muted); margin-top:6px; line-height:1.7">
+        <b>Откуда взять:</b><br>
+        • Открой майнер в GoMining — скопируй URL из адресной строки: <code style="font-size:10px">https://app.gomining.com/nft/acea4fac-3a39-…</code><br>
+        • Или найди NFT на getgems → скопируй адрес контракта: <code style="font-size:10px">EQBy…</code>
       </div>
     </div>
+    <select id="singleCollection" style="display:none">
+      <option value="GoMining Digital Miners: Release 2" selected>Release 2</option>
+      <option value="GoMining Digital Miners">Release 1</option>
+    </select>
     <div id="singleStatus" class="hidden"></div>
     <div id="singleResult"></div>
   </div>
@@ -400,7 +402,7 @@
   </div>
 
   <!-- Tab: Scan -->
-  <div id="pane-scan" class="hidden">
+  <div id="pane-scan">
     <div class="search-box">
       <h2>Сканировать листинги маркетплейса</h2>
       <div class="input-row">
