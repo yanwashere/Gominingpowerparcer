@@ -334,7 +334,9 @@
       <div class="settings-actions">
         <button class="btn btn-primary btn-sm" onclick="saveSettings()">💾 Сохранить</button>
         <button class="btn btn-secondary btn-sm" onclick="clearSettings()">🗑️ Очистить токены</button>
+        <button class="btn btn-secondary btn-sm" onclick="testApis()">🔬 Тест API</button>
       </div>
+      <div id="apiTestResult" class="hidden" style="margin-top:8px; font-size:12px; font-family:monospace; background:var(--bg); padding:10px; border-radius:6px; border:1px solid var(--border); line-height:1.8;"></div>
     </div>
   </div>
 
@@ -514,15 +516,35 @@ function proxyUrl(url) {
 }
 
 async function gqlPost(query, variables) {
-  const resp = await fetch(GETGEMS_GQL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query, variables }),
-  });
-  if (!resp.ok) throw new Error(`getgems HTTP ${resp.status}`);
-  const data = await resp.json();
-  if (data.errors) throw new Error(data.errors.map(e => e.message).join("; "));
-  return data.data;
+  let lastErr;
+  // Try direct first, then via CORS proxy if configured
+  const urls = [GETGEMS_GQL];
+  const proxy = getSettings().corsProxy.trim();
+  if (proxy) urls.push(proxy + encodeURIComponent(GETGEMS_GQL));
+
+  for (const url of urls) {
+    try {
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, variables }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+      const data = await resp.json();
+      if (data.errors) {
+        const msgs = data.errors.map(e => e.message).join("; ");
+        // If field not found — caller will try next query variant
+        throw new Error(`GraphQL: ${msgs}`);
+      }
+      return data.data;
+    } catch(e) {
+      lastErr = e;
+      // "Failed to fetch" = network/CORS, try proxy if not tried yet
+      if (e.message === "Failed to fetch" && url === GETGEMS_GQL && proxy) continue;
+      break;
+    }
+  }
+  throw lastErr || new Error("Failed to fetch");
 }
 
 async function tonapiGet(path, params = {}) {
@@ -562,16 +584,64 @@ async function gmGet(path, params = {}) {
 // GRAPHQL QUERIES
 // ──────────────────────────────────────────────────────────────────────────────
 
-const GQL_ITEM_BY_INDEX = `
-query NftItemByIndex($collectionAddress: String!, $index: String!) {
-  alphaNftItemByIndex(collectionAddress: $collectionAddress, itemIndex: $index) {
-    address index name
-    attributes { key value }
-    sale {
-      ... on NftSaleFix { fullPrice }
+// Multiple query variants — getgems has changed their schema over time
+const GQL_VARIANTS_BY_INDEX = [
+  // Variant A: alphaNftItemByIndex (older API)
+  `query Q($collectionAddress: String!, $index: String!) {
+    alphaNftItemByIndex(collectionAddress: $collectionAddress, itemIndex: $index) {
+      address index name
+      attributes { key value }
+      sale { ... on NftSaleFix { fullPrice } }
+    }
+  }`,
+  // Variant B: nftItemByIndex (alternative name)
+  `query Q($collectionAddress: String!, $index: String!) {
+    nftItemByIndex(collectionAddress: $collectionAddress, index: $index) {
+      address index name
+      attributes { key value }
+      sale { ... on NftSaleFix { fullPrice } }
+    }
+  }`,
+  // Variant C: via nftSearch filtered (slower but reliable)
+  `query Q($collectionAddress: String!) {
+    nftSearch(
+      collections: [$collectionAddress]
+      count: 1
+      filters: { saleType: ALL }
+    ) {
+      items { ... on NftItem {
+        address index name
+        attributes { key value }
+        sale { ... on NftSaleFix { fullPrice } }
+      }}
+    }
+  }`,
+];
+
+async function gqlGetByIndex(collectionAddress, index) {
+  const vars = { collectionAddress, index: String(index) };
+  let lastErr;
+  for (const q of GQL_VARIANTS_BY_INDEX) {
+    try {
+      const data = await gqlPost(q, vars);
+      // Extract item regardless of field name
+      const item = data?.alphaNftItemByIndex
+        || data?.nftItemByIndex
+        || data?.nftSearch?.items?.[0];
+      if (item && (parseInt(item.index) === index || GQL_VARIANTS_BY_INDEX.indexOf(q) < 2)) {
+        return item;
+      }
+    } catch(e) {
+      lastErr = e;
+      // If it's CORS/network — don't try other variants (same problem)
+      if (e.message === "Failed to fetch" || e.message.includes("NetworkError")) throw e;
+      // If it's "field not found" — try next variant
+      continue;
     }
   }
-}`;
+  if (lastErr) throw lastErr;
+  return null;
+}
 
 const GQL_SALES = `
 query NftSales($collectionAddress: String!, $count: Int!, $cursor: String) {
@@ -692,10 +762,7 @@ async function fetchMiner(index, collectionName) {
 
   // 1. getgems
   try {
-    const data = await gqlPost(GQL_ITEM_BY_INDEX, {
-      collectionAddress: colAddr, index: String(index),
-    });
-    const item = data?.alphaNftItemByIndex || data?.nftItemByIndex;
+    const item = await gqlGetByIndex(colAddr, index);
     if (item) {
       miner.address   = item.address || null;
       miner.name      = item.name || `#${index}`;
@@ -704,10 +771,18 @@ async function fetchMiner(index, collectionName) {
       const attrs     = parseAttrs(item.attributes);
       miner.baselinePower = parseBaselinePower(attrs);
       miner.baselineEff   = parseEfficiency(attrs);
-      miner.dataSource.push("getgems");
+      miner.dataSource.push("getgems ✓");
+    } else {
+      miner.dataSource.push("getgems: майнер не найден");
     }
   } catch(e) {
-    miner.dataSource.push(`getgems:err(${e.message.substring(0,40)})`);
+    const isCors = e.message === "Failed to fetch" || e.message.includes("NetworkError");
+    miner.getgemsError = e.message;
+    miner.isCorsError  = isCors;
+    miner.dataSource.push(isCors
+      ? "getgems: CORS (нужен прокси)"
+      : `getgems: ${e.message.substring(0, 60)}`
+    );
   }
 
   // 2. GoMining API (real power)
@@ -903,13 +978,26 @@ function renderSingleCard(m) {
       </div>` : ""}
     </div>
 
+    ${m.isCorsError ? `<div class="notice notice-warn">
+      <span class="notice-icon">🌐</span>
+      <div><b>CORS ошибка</b> — браузер блокирует запросы к getgems API с GitHub Pages.<br>
+      Решения:
+      <ol style="margin:6px 0 0 18px; line-height:1.8">
+        <li>Открой <b>Настройки ⚙️</b> → вставь CORS прокси: <code>https://corsproxy.io/?</code></li>
+        <li>Или установи расширение <b>CORS Unblock</b> для Safari/Chrome</li>
+        <li>Или открой страницу напрямую на <a href="https://nft.gomining.com" target="_blank" style="color:var(--accent2)">nft.gomining.com</a></li>
+      </ol></div>
+    </div>` : ""}
+
     ${!getSettings().token ? `<div class="notice notice-warn">
       <span class="notice-icon">⚠️</span>
       <div>Токен GoMining не задан — реальная мощность (с апгрейдами) не запрашивается.
         <a href="#" onclick="toggleSettings(); return false;" style="color:var(--accent2)">Добавить токен →</a></div>
     </div>` : ""}
 
-    <div style="font-size:11px; color:var(--muted)">Источники данных: ${m.dataSource.join(", ") || "нет"}</div>
+    <div style="font-size:11px; color:var(--muted)">Источники данных: ${m.dataSource.join(", ") || "нет"}
+      ${m.getgemsError && !m.isCorsError ? `<br><span style="color:var(--red)">getgems ошибка: ${esc(m.getgemsError.substring(0,120))}</span>` : ""}
+    </div>
   </div>`;
 }
 
@@ -1240,6 +1328,84 @@ function exportCSV() {
   a.href = url; a.download = `gomining_miners_${Date.now()}.csv`;
   a.click(); URL.revokeObjectURL(url);
   showToast(`📥 Экспортировано ${currentMiners.length} майнеров`);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// API DIAGNOSTICS
+// ──────────────────────────────────────────────────────────────────────────────
+
+async function testApis() {
+  saveSettings();
+  const el = document.getElementById("apiTestResult");
+  el.classList.remove("hidden");
+  el.innerHTML = "⏳ Тестируем API...";
+
+  const lines = [];
+  const ok  = s => `<span style="color:var(--green)">✓ ${s}</span>`;
+  const err = s => `<span style="color:var(--red)">✗ ${s}</span>`;
+  const warn= s => `<span style="color:var(--yellow)">⚠ ${s}</span>`;
+
+  // Test 1: getgems direct
+  try {
+    const data = await gqlPost(
+      `query { alphaNftItemByIndex(collectionAddress: "EQBY-QwusK_kNxUy2F7LpPa7-e8XKEskLedb6fXzJ6n9JjWD", itemIndex: "1") { name } }`,
+      {}
+    );
+    lines.push(ok("getgems API доступен (alphaNftItemByIndex)"));
+  } catch(e) {
+    if (e.message === "Failed to fetch") {
+      lines.push(err("getgems API — CORS блокировка. Нужен прокси в настройках."));
+    } else if (e.message.includes("GraphQL")) {
+      // API accessible but field name wrong — try other
+      try {
+        const data2 = await gqlPost(
+          `query { nftItemByIndex(collectionAddress: "EQBY-QwusK_kNxUy2F7LpPa7-e8XKEskLedb6fXzJ6n9JjWD", index: "1") { name } }`,
+          {}
+        );
+        lines.push(ok("getgems API доступен (nftItemByIndex)"));
+      } catch(e2) {
+        lines.push(warn(`getgems API доступен, но ошибка: ${e2.message.substring(0,80)}`));
+      }
+    } else {
+      lines.push(err(`getgems: ${e.message.substring(0, 80)}`));
+    }
+  }
+
+  // Test 2: tonapi
+  try {
+    const s = getSettings();
+    const headers = { Accept: "application/json" };
+    if (s.tonapiKey) headers.Authorization = `Bearer ${s.tonapiKey}`;
+    const r = await fetch(`${TONAPI_BASE}/nfts/collections/EQBY-QwusK_kNxUy2F7LpPa7-e8XKEskLedb6fXzJ6n9JjWD`, { headers });
+    if (r.ok) lines.push(ok("tonapi.io доступен"));
+    else lines.push(warn(`tonapi.io: HTTP ${r.status}`));
+  } catch(e) {
+    lines.push(e.message === "Failed to fetch"
+      ? warn("tonapi.io — CORS (не критично, используем getgems)")
+      : err(`tonapi.io: ${e.message.substring(0,60)}`));
+  }
+
+  // Test 3: GoMining API
+  const token = getSettings().token;
+  if (token) {
+    try {
+      const r = await fetch(`${GOMINING_API}/miners/1`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (r.status === 401) lines.push(err("GoMining: токен недействителен (401)"));
+      else if (r.status === 404) lines.push(ok("GoMining API доступен (майнер 1 не найден — это норм)"));
+      else if (r.ok) lines.push(ok("GoMining API доступен"));
+      else lines.push(warn(`GoMining: HTTP ${r.status}`));
+    } catch(e) {
+      lines.push(e.message === "Failed to fetch"
+        ? err("GoMining API — CORS блокировка. Укажи CORS прокси в настройках.")
+        : err(`GoMining: ${e.message.substring(0,60)}`));
+    }
+  } else {
+    lines.push(warn("GoMining: токен не задан — пропущено"));
+  }
+
+  el.innerHTML = lines.join("<br>");
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
