@@ -510,19 +510,20 @@ function switchTab(name) {
 // API HELPERS
 // ──────────────────────────────────────────────────────────────────────────────
 
+// corsproxy.io and cors-anywhere expect raw URL (no encoding)
 function proxyUrl(url) {
   const proxy = getSettings().corsProxy.trim();
-  return proxy ? proxy + encodeURIComponent(url) : url;
+  return proxy ? proxy + url : url;
 }
 
 async function gqlPost(query, variables) {
-  let lastErr;
-  // Try direct first, then via CORS proxy if configured
-  const urls = [GETGEMS_GQL];
   const proxy = getSettings().corsProxy.trim();
-  if (proxy) urls.push(proxy + encodeURIComponent(GETGEMS_GQL));
+  // Direct first; if CORS error and proxy configured — retry via proxy
+  const urlsToTry = [GETGEMS_GQL];
+  if (proxy) urlsToTry.push(proxy + GETGEMS_GQL);
 
-  for (const url of urls) {
+  let lastErr;
+  for (const url of urlsToTry) {
     try {
       const resp = await fetch(url, {
         method: "POST",
@@ -531,16 +532,12 @@ async function gqlPost(query, variables) {
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
       const data = await resp.json();
-      if (data.errors) {
-        const msgs = data.errors.map(e => e.message).join("; ");
-        // If field not found — caller will try next query variant
-        throw new Error(`GraphQL: ${msgs}`);
-      }
+      if (data.errors) throw new Error(`GraphQL: ${data.errors.map(e => e.message).join("; ")}`);
       return data.data;
     } catch(e) {
       lastErr = e;
-      // "Failed to fetch" = network/CORS, try proxy if not tried yet
-      if (e.message === "Failed to fetch" && url === GETGEMS_GQL && proxy) continue;
+      const isNetwork = ["Failed to fetch","Load failed","NetworkError"].some(s => e.message.includes(s));
+      if (isNetwork && url === GETGEMS_GQL && proxy) continue; // retry via proxy
       break;
     }
   }
@@ -556,6 +553,67 @@ async function tonapiGet(path, params = {}) {
   const resp = await fetch(url.toString(), { headers });
   if (!resp.ok) throw new Error(`tonapi HTTP ${resp.status}`);
   return resp.json();
+}
+
+// Resolve NFT address from collection + index via tonapi blockchain method call
+async function tonapiResolveNftAddress(colAddr, index) {
+  try {
+    const data = await tonapiGet(
+      `/blockchain/accounts/${colAddr}/methods/get_nft_address_by_index`,
+      { args: String(index) }
+    );
+    // tonapi v2 may return decoded address directly
+    if (data?.decoded?.address) return data.decoded.address;
+    // Or inside stack as slice value
+    const stack = data?.stack || [];
+    for (const item of stack) {
+      if (item.address) return item.address;
+      if (item.type === "slice" && item.slice?.bytes) {
+        // Raw address bytes — tonapi usually decodes this
+        return null; // skip, not decoded
+      }
+    }
+    return null;
+  } catch { return null; }
+}
+
+// Get NFT item metadata from tonapi by its address
+async function tonapiGetNft(nftAddr) {
+  try {
+    return await tonapiGet(`/nfts/${nftAddr}`);
+  } catch { return null; }
+}
+
+// Parse tonapi NFT item into our attribute format
+function parseTonapiNft(item) {
+  if (!item) return null;
+  const meta = item.metadata || {};
+  const attrs = {};
+  // tonapi attributes: [{trait_type, value}]
+  for (const a of meta.attributes || []) {
+    const key = String(a.trait_type || a.key || "").toUpperCase().replace(/\s+/g, "_");
+    attrs[key] = a.value;
+  }
+  return {
+    address:    item.address || null,
+    index:      item.index ?? null,
+    name:       meta.name || null,
+    attributes: attrs,
+    // tonapi also returns sale info in some cases
+    sale:       item.sale || null,
+    owner:      item.owner?.address || null,
+  };
+}
+
+// Get NFT by collection + index using tonapi (no CORS issues)
+async function tonapiGetByIndex(colAddr, index) {
+  // Step 1: resolve NFT address via blockchain method
+  const nftAddr = await tonapiResolveNftAddress(colAddr, index);
+  if (!nftAddr) return null;
+
+  // Step 2: get NFT data
+  const raw = await tonapiGetNft(nftAddr);
+  return parseTonapiNft(raw);
 }
 
 async function gmGet(path, params = {}) {
@@ -760,32 +818,55 @@ async function fetchMiner(index, collectionName) {
     dataSource: [],
   };
 
-  // 1. getgems
+  // 1. tonapi — primary source for NFT metadata & attributes (no CORS issues)
   try {
-    const item = await gqlGetByIndex(colAddr, index);
-    if (item) {
-      miner.address   = item.address || null;
-      miner.name      = item.name || `#${index}`;
-      miner.isOnSale  = !!item.sale;
-      miner.priceTon  = parsePriceTon(item);
-      const attrs     = parseAttrs(item.attributes);
-      miner.baselinePower = parseBaselinePower(attrs);
-      miner.baselineEff   = parseEfficiency(attrs);
-      miner.dataSource.push("getgems ✓");
+    const ton = await tonapiGetByIndex(colAddr, index);
+    if (ton) {
+      miner.address       = ton.address;
+      miner.name          = ton.name || `#${index}`;
+      miner.baselinePower = parseBaselinePower(ton.attributes);
+      miner.baselineEff   = parseEfficiency(ton.attributes);
+      // tonapi may include sale data too
+      if (ton.sale?.price?.value) {
+        miner.priceTon  = parseInt(ton.sale.price.value) / NANOTON;
+        miner.isOnSale  = true;
+      }
+      miner.dataSource.push("tonapi ✓");
     } else {
-      miner.dataSource.push("getgems: майнер не найден");
+      miner.dataSource.push("tonapi: адрес не разрешён");
     }
   } catch(e) {
-    const isCors = e.message === "Failed to fetch" || e.message.includes("NetworkError");
+    miner.dataSource.push(`tonapi: ${e.message.substring(0, 50)}`);
+  }
+
+  // 2. getgems — for marketplace price (optional, may fail due to CORS)
+  try {
+    const gg = await gqlGetByIndex(colAddr, index);
+    if (gg) {
+      if (!miner.address) miner.address = gg.address;
+      if (!miner.name || miner.name === `#${index}`) miner.name = gg.name || miner.name;
+      miner.isOnSale = !!gg.sale;
+      const price = parsePriceTon(gg);
+      if (price) miner.priceTon = price;
+      // Attributes from getgems as fallback if tonapi didn't have them
+      if (!miner.baselinePower) {
+        const attrs = parseAttrs(gg.attributes);
+        miner.baselinePower = parseBaselinePower(attrs);
+        miner.baselineEff   = parseEfficiency(attrs);
+      }
+      miner.dataSource.push("getgems ✓");
+    }
+  } catch(e) {
+    const isNetwork = ["Failed to fetch","Load failed","NetworkError"].some(s => e.message.includes(s));
     miner.getgemsError = e.message;
-    miner.isCorsError  = isCors;
-    miner.dataSource.push(isCors
-      ? "getgems: CORS (нужен прокси)"
-      : `getgems: ${e.message.substring(0, 60)}`
+    miner.isCorsError  = isNetwork && !getSettings().corsProxy;
+    miner.dataSource.push(isNetwork
+      ? `getgems: недоступен${getSettings().corsProxy ? " (прокси тоже не помог)" : " (CORS)"}`
+      : `getgems: ${e.message.substring(0, 50)}`
     );
   }
 
-  // 2. GoMining API (real power)
+  // 3. GoMining API — real power with upgrades (needs token)
   try {
     let gmData = await gmGet(`/miners/${index}`);
     if (!gmData && miner.address) {
@@ -794,7 +875,7 @@ async function fetchMiner(index, collectionName) {
     if (gmData) {
       miner.realPower = parseGmPower(gmData);
       miner.realEff   = parseGmEfficiency(gmData);
-      miner.dataSource.push("gomining");
+      miner.dataSource.push("gomining ✓");
     }
   } catch(e) {
     if (e.message.includes("401")) throw e;
@@ -813,6 +894,7 @@ async function fetchCollectionSales(colName, maxItems, onProgress) {
   const items = [];
   let cursor = null;
   let errorCount = 0;
+  let getgemsBlocked = false;
 
   while (items.length < maxItems) {
     const batch = Math.min(200, maxItems - items.length);
@@ -827,10 +909,17 @@ async function fetchCollectionSales(colName, maxItems, onProgress) {
       onProgress(items.length, maxItems);
       if (!cursor || page.length === 0) break;
     } catch(e) {
+      const isNetwork = ["Failed to fetch","Load failed","NetworkError"].some(s => e.message.includes(s));
+      if (isNetwork) { getgemsBlocked = true; break; }
       errorCount++;
       if (errorCount > 3) break;
       await sleep(1000);
     }
+  }
+
+  if (getgemsBlocked && items.length === 0) {
+    // getgems blocked — surface the error for UI to show
+    throw new Error("GETGEMS_BLOCKED");
   }
   return items;
 }
@@ -1281,7 +1370,13 @@ async function scanMarketplace() {
     renderTable(filtered, "scanResult");
 
   } catch(e) {
-    setStatus("scanStatus", "error", `❌ Ошибка: ${esc(e.message)}`);
+    if (e.message === "GETGEMS_BLOCKED") {
+      setStatus("scanStatus", "error",
+        `❌ getgems API заблокирован (CORS). Сканирование маркетплейса недоступно без прокси.<br>
+        Открой ⚙️ Настройки → CORS Proxy → вставь <b>https://corsproxy.io/?</b> → Сохранить.`);
+    } else {
+      setStatus("scanStatus", "error", `❌ Ошибка: ${esc(e.message)}`);
+    }
   } finally {
     document.getElementById("btnScan").disabled = false;
   }
@@ -1335,7 +1430,11 @@ function exportCSV() {
 // ──────────────────────────────────────────────────────────────────────────────
 
 async function testApis() {
+  // Read token directly from UI field (don't require prior Save click)
+  const tokenFromField = document.getElementById("tokenInput").value.trim();
+  if (tokenFromField) localStorage.setItem("gm_token", tokenFromField);
   saveSettings();
+
   const el = document.getElementById("apiTestResult");
   el.classList.remove("hidden");
   el.innerHTML = "⏳ Тестируем API...";
@@ -1344,65 +1443,69 @@ async function testApis() {
   const ok  = s => `<span style="color:var(--green)">✓ ${s}</span>`;
   const err = s => `<span style="color:var(--red)">✗ ${s}</span>`;
   const warn= s => `<span style="color:var(--yellow)">⚠ ${s}</span>`;
+  const COL1 = "EQBY-QwusK_kNxUy2F7LpPa7-e8XKEskLedb6fXzJ6n9JjWD";
 
-  // Test 1: getgems direct
+  // Test 1: tonapi.io — resolve NFT address (main data source)
+  try {
+    const data = await tonapiGet(`/blockchain/accounts/${COL1}/methods/get_nft_address_by_index`, { args: "1" });
+    if (data?.success !== false) {
+      const addr = data?.decoded?.address || data?.stack?.[0]?.address;
+      lines.push(ok(`tonapi.io: NFT адрес получен${addr ? " → " + addr.substring(0,20) + "..." : ""}`));
+    } else {
+      lines.push(warn(`tonapi.io: метод вернул exit_code=${data?.exit_code}`));
+    }
+  } catch(e) {
+    const isNetwork = ["Failed to fetch","Load failed"].some(s => e.message.includes(s));
+    lines.push(isNetwork
+      ? err("tonapi.io: недоступен (CORS или сеть)")
+      : warn(`tonapi.io: ${e.message.substring(0,80)}`));
+  }
+
+  // Test 2: tonapi NFT metadata
+  try {
+    const data = await tonapiGet(`/nfts/collections/${COL1}`);
+    lines.push(ok(`tonapi.io: коллекция найдена "${data?.metadata?.name || "GoMining"}"`));
+  } catch(e) {
+    lines.push(warn(`tonapi.io (коллекция): ${e.message.substring(0,60)}`));
+  }
+
+  // Test 3: getgems GraphQL (for prices)
   try {
     const data = await gqlPost(
-      `query { alphaNftItemByIndex(collectionAddress: "EQBY-QwusK_kNxUy2F7LpPa7-e8XKEskLedb6fXzJ6n9JjWD", itemIndex: "1") { name } }`,
-      {}
+      `query { alphaNftItemByIndex(collectionAddress: "${COL1}", itemIndex: "1") { name } }`, {}
     );
-    lines.push(ok("getgems API доступен (alphaNftItemByIndex)"));
+    lines.push(ok("getgems: доступен ✓ (цены будут работать)"));
   } catch(e) {
-    if (e.message === "Failed to fetch") {
-      lines.push(err("getgems API — CORS блокировка. Нужен прокси в настройках."));
+    const isNetwork = ["Failed to fetch","Load failed","NetworkError"].some(s => e.message.includes(s));
+    const proxy = getSettings().corsProxy;
+    if (isNetwork) {
+      lines.push(err(`getgems: CORS блокировка${proxy ? " (прокси тоже не помог — попробуй другой)" : " — цены недоступны, но атрибуты через tonapi работают"}`));
     } else if (e.message.includes("GraphQL")) {
-      // API accessible but field name wrong — try other
-      try {
-        const data2 = await gqlPost(
-          `query { nftItemByIndex(collectionAddress: "EQBY-QwusK_kNxUy2F7LpPa7-e8XKEskLedb6fXzJ6n9JjWD", index: "1") { name } }`,
-          {}
-        );
-        lines.push(ok("getgems API доступен (nftItemByIndex)"));
-      } catch(e2) {
-        lines.push(warn(`getgems API доступен, но ошибка: ${e2.message.substring(0,80)}`));
-      }
+      lines.push(warn(`getgems: API доступен, но запрос не принят: ${e.message.substring(7,80)}`));
     } else {
-      lines.push(err(`getgems: ${e.message.substring(0, 80)}`));
+      lines.push(err(`getgems: ${e.message.substring(0,80)}`));
     }
   }
 
-  // Test 2: tonapi
-  try {
-    const s = getSettings();
-    const headers = { Accept: "application/json" };
-    if (s.tonapiKey) headers.Authorization = `Bearer ${s.tonapiKey}`;
-    const r = await fetch(`${TONAPI_BASE}/nfts/collections/EQBY-QwusK_kNxUy2F7LpPa7-e8XKEskLedb6fXzJ6n9JjWD`, { headers });
-    if (r.ok) lines.push(ok("tonapi.io доступен"));
-    else lines.push(warn(`tonapi.io: HTTP ${r.status}`));
-  } catch(e) {
-    lines.push(e.message === "Failed to fetch"
-      ? warn("tonapi.io — CORS (не критично, используем getgems)")
-      : err(`tonapi.io: ${e.message.substring(0,60)}`));
-  }
-
-  // Test 3: GoMining API
+  // Test 4: GoMining API
   const token = getSettings().token;
   if (token) {
     try {
-      const r = await fetch(`${GOMINING_API}/miners/1`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (r.status === 401) lines.push(err("GoMining: токен недействителен (401)"));
-      else if (r.status === 404) lines.push(ok("GoMining API доступен (майнер 1 не найден — это норм)"));
-      else if (r.ok) lines.push(ok("GoMining API доступен"));
-      else lines.push(warn(`GoMining: HTTP ${r.status}`));
+      const proxyPrefix = getSettings().corsProxy;
+      const url = proxyPrefix ? proxyPrefix + `${GOMINING_API}/miners/1` : `${GOMINING_API}/miners/1`;
+      const r = await fetch(url, { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } });
+      if (r.status === 401)     lines.push(err("GoMining: токен недействителен (401) — получи новый"));
+      else if (r.status === 404) lines.push(ok("GoMining API доступен (404 = майнер #1 не найден, это нормально)"));
+      else if (r.ok)             lines.push(ok(`GoMining API доступен (${r.status})`));
+      else                       lines.push(warn(`GoMining: HTTP ${r.status}`));
     } catch(e) {
-      lines.push(e.message === "Failed to fetch"
-        ? err("GoMining API — CORS блокировка. Укажи CORS прокси в настройках.")
+      const isNetwork = ["Failed to fetch","Load failed"].some(s => e.message.includes(s));
+      lines.push(isNetwork
+        ? err("GoMining API — CORS блокировка. Укажи CORS прокси (corsproxy.io/?)")
         : err(`GoMining: ${e.message.substring(0,60)}`));
     }
   } else {
-    lines.push(warn("GoMining: токен не задан — пропущено"));
+    lines.push(warn("GoMining: токен не введён — реальная мощность недоступна"));
   }
 
   el.innerHTML = lines.join("<br>");
