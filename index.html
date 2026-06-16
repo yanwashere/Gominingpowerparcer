@@ -672,6 +672,7 @@ async function gmGet(path, params = {}) {
       headers: {
         "Authorization": `Bearer ${s.token}`,
         "Content-Type": "application/json",
+        "Accept": "application/json",
       },
     });
     if (resp.status === 401) throw new Error("401: Токен недействителен или истёк");
@@ -679,8 +680,25 @@ async function gmGet(path, params = {}) {
     return resp.json();
   } catch(e) {
     if (e.message.includes("401")) throw e;
-    return null; // CORS or network error — silent fail
+    return null;
   }
+}
+
+// Try multiple GoMining API endpoint patterns for a given tokenId
+async function gmFetchMiner(tokenId) {
+  // Pattern 1: /v1/nfts/{tokenId} (by sequential NFT number)
+  let raw = await gmGet(`/v1/nfts/${tokenId}`);
+  if (raw) return parseGmData(raw);
+
+  // Pattern 2: /nfts/{tokenId}
+  raw = await gmGet(`/nfts/${tokenId}`);
+  if (raw) return parseGmData(raw);
+
+  // Pattern 3: /v1/nfts?tokenId=...
+  raw = await gmGet(`/v1/nfts`, { tokenId });
+  if (raw) return parseGmData(raw);
+
+  return null;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -816,35 +834,35 @@ function parsePriceTon(item) {
   return null;
 }
 
-function parseGmPower(data) {
-  if (!data) return null;
-  const keys = ["power","hashrate","computing_power","computingPower","currentPower","current_power","th","ths","total_power","totalPower"];
-  for (const k of keys) {
-    if (data[k] !== undefined) { const v = parseFloat(data[k]); if (!isNaN(v)) return v; }
-  }
-  for (const sub of ["stats","attributes","data","miner"]) {
-    if (data[sub] && typeof data[sub] === "object") {
-      const v = parseGmPower(data[sub]);
-      if (v !== null) return v;
-    }
-  }
-  return null;
+function parseGmData(raw) {
+  // GoMining API wraps response in {data: {...}}
+  const d = raw?.data ?? raw;
+  if (!d) return null;
+
+  const power = parseFloat(d.power ?? d.eligiblePower ?? d.hashrate ?? d.computingPower);
+  const eff   = parseFloat(d.energyEfficiency ?? d.energy_efficiency ?? d.efficiency);
+  const priceUsdt = parseFloat(d.priceUsdt ?? d.price_usdt);
+  const priceTon  = parseFloat(d.priceTon ?? d.price_ton);
+
+  return {
+    power:       isNaN(power)     ? null : power,
+    efficiency:  isNaN(eff)       ? null : eff,
+    priceUsdt:   isNaN(priceUsdt) ? null : priceUsdt,
+    priceTon:    isNaN(priceTon)  ? null : priceTon,
+    isUpgraded:  d.isUpgraded ?? false,
+    level:       d.level ?? null,
+    status:      d.status ?? null,
+    tokenId:     d.tokenId ?? null,
+    internalId:  d.id ?? null,
+    // ROI data
+    roi:         d.roi ?? null,
+    incomeAgg:   d.nftIncomeAggregation ?? null,
+  };
 }
 
-function parseGmEfficiency(data) {
-  if (!data) return null;
-  const keys = ["efficiency","energy_efficiency","energyEfficiency","wth","w_per_th","wPerTh"];
-  for (const k of keys) {
-    if (data[k] !== undefined) { const v = parseFloat(data[k]); if (!isNaN(v)) return v; }
-  }
-  for (const sub of ["stats","attributes","data","miner"]) {
-    if (data[sub] && typeof data[sub] === "object") {
-      const v = parseGmEfficiency(data[sub]);
-      if (v !== null) return v;
-    }
-  }
-  return null;
-}
+// Keep for backwards compat
+function parseGmPower(data)      { return parseGmData(data)?.power ?? null; }
+function parseGmEfficiency(data) { return parseGmData(data)?.efficiency ?? null; }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // FETCH SINGLE MINER
@@ -904,15 +922,21 @@ async function fetchMiner(index, collectionName) {
     }
   }
 
-  // 3. GoMining API — real power with upgrades (needs token)
+  // 3. GoMining API — real power, efficiency, ROI (needs token)
   try {
-    let gmData = await gmGet(`/miners/${index}`);
-    if (!gmData && miner.address) {
-      gmData = await gmGet(`/nfts/by-address/${miner.address}`);
-    }
-    if (gmData) {
-      miner.realPower = parseGmPower(gmData);
-      miner.realEff   = parseGmEfficiency(gmData);
+    const gm = await gmFetchMiner(index);
+    if (gm) {
+      miner.realPower    = gm.power;
+      miner.realEff      = gm.efficiency;
+      miner.isUpgraded   = gm.isUpgraded;
+      miner.gmLevel      = gm.level;
+      miner.gmStatus     = gm.status;
+      miner.roi          = gm.roi;
+      miner.incomeAgg    = gm.incomeAgg;
+      // GoMining may have more accurate price in USD
+      if (gm.priceUsdt) miner.priceUsdt = gm.priceUsdt;
+      if (gm.priceTon && !miner.priceTon) miner.priceTon = gm.priceTon;
+      if (gm.status === "sale" && !miner.isOnSale) miner.isOnSale = true;
       miner.dataSource.push("gomining ✓");
     }
   } catch(e) {
@@ -1090,13 +1114,22 @@ function renderSingleCard(m) {
 
       <div class="stat-card stat-yellow">
         <div class="stat-label">Цена</div>
-        ${m.priceTon !== null
+        ${m.priceUsdt != null
+          ? `<div class="stat-value">$${m.priceUsdt.toFixed(2)}</div>
+             <div class="stat-sub">${m.priceTon ? m.priceTon.toFixed(1) + " TON · " : ""}${m.isOnSale ? "На продаже" : "Не выставлен"}</div>`
+          : m.priceTon != null
           ? `<div class="stat-value">${m.priceTon.toFixed(2)} <small style="font-size:14px">TON</small></div>
-             <div class="stat-sub">${m.isOnSale ? "На продаже" : "Не выставлен"}</div>`
+             <div class="stat-sub">${m.isOnSale ? "На продаже" : "—"}</div>`
           : `<div class="stat-value" style="font-size:15px;color:var(--muted)">—</div>
-             <div class="stat-sub">${m.address ? `<a href="https://getgems.io/nft/${m.address}" target="_blank" style="color:var(--accent2)">Открыть на getgems →</a>` : "нет данных"}</div>`
+             <div class="stat-sub">${m.address ? `<a href="https://getgems.io/nft/${m.address}" target="_blank" style="color:var(--accent2)">getgems →</a>` : ""}</div>`
         }
       </div>
+
+      ${m.roi?.actual ? `<div class="stat-card">
+        <div class="stat-label">ROI (текущий)</div>
+        <div class="stat-value" style="font-size:18px">$${m.roi.actual.netReward?.toFixed(1)}<small style="font-size:12px">/год</small></div>
+        <div class="stat-sub">Окупаемость: ${m.roi.actual.paybackPeriodInMonths?.toFixed(0)} мес.</div>
+      </div>` : ""}
 
       ${val !== null ? `<div class="stat-card stat-purple">
         <div class="stat-label">TH / TON</div>
