@@ -350,21 +350,15 @@
   <!-- Tab: Single / List miner lookup -->
   <div id="pane-single" class="hidden">
     <div class="search-box">
-      <h2>Проверить конкретный майнер</h2>
-      <div style="background:rgba(255,200,0,0.08); border:1px solid rgba(255,200,0,0.25); border-radius:8px; padding:10px 14px; font-size:12px; color:var(--muted); margin-bottom:12px; line-height:1.6">
-        ⚠️ <b>Внимание:</b> GoMining показывает своё <i>внутреннее</i> число (tokenId), которое <b>не совпадает</b> с индексом NFT в блокчейне. Вводить просто число бессмысленно.<br>
-        Используй <b>URL из GoMining</b> или <b>адрес NFT</b>. Для поиска по рынку — вкладка "Сканировать маркетплейс".
-      </div>
+      <h2>Проверить майнер по номеру</h2>
       <div class="input-row">
         <input type="text" class="main-input" id="singleId" style="flex:1"
-          placeholder="URL GoMining (app.gomining.com/nft/…) или адрес EQ… из кошелька/getgems"
+          placeholder="Номер с getgems / URL GoMining / адрес EQ…"
           onkeydown="if(event.key==='Enter')lookupSingle()">
         <button class="btn btn-primary" onclick="lookupSingle()" id="btnSingle">🔍 Найти</button>
       </div>
-      <div style="font-size:11px; color:var(--muted); margin-top:6px; line-height:1.7">
-        <b>Откуда взять:</b><br>
-        • Открой майнер в GoMining — скопируй URL из адресной строки: <code style="font-size:10px">https://app.gomining.com/nft/acea4fac-3a39-…</code><br>
-        • Или найди NFT на getgems → скопируй адрес контракта: <code style="font-size:10px">EQBy…</code>
+      <div style="font-size:11px; color:var(--muted); margin-top:6px">
+        Вводи номер майнера с getgems (или URL GoMining, или адрес EQ…) — автоматически найдёт нужную коллекцию
       </div>
     </div>
     <select id="singleCollection" style="display:none">
@@ -913,7 +907,18 @@ function parseGmEfficiency(data) { return parseGmData(data)?.efficiency ?? null;
 // ──────────────────────────────────────────────────────────────────────────────
 
 async function fetchMiner(index, collectionName) {
-  const colName   = collectionName || guessCollection(index);
+  // If no collection specified, try both and use the one that gives a GoMining NFT
+  if (!collectionName) {
+    for (const colName of Object.keys(COLLECTIONS)) {
+      const result = await fetchMiner(index, colName);
+      if (result.baselinePower !== null || result.realPower !== null) return result;
+      if (result.name && /(mine|miner|gomining|digital)/i.test(result.name)) return result;
+    }
+    // Nothing matched — return last attempt
+    return fetchMiner(index, "GoMining Digital Miners: Release 2");
+  }
+
+  const colName   = collectionName;
   const colAddr   = COLLECTIONS[colName];
 
   const miner = {
