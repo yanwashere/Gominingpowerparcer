@@ -507,6 +507,37 @@ function switchTab(name) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// TON ADDRESS UTILITIES
+// ──────────────────────────────────────────────────────────────────────────────
+
+function crc16(data) {
+  let crc = 0;
+  for (const b of data) {
+    crc ^= b << 8;
+    for (let i = 0; i < 8; i++) crc = (crc & 0x8000) ? (crc << 1) ^ 0x1021 : crc << 1;
+  }
+  return crc & 0xFFFF;
+}
+
+// Convert raw TON address "0:abc123..." → user-friendly EQ... (bounceable)
+function rawAddrToEQ(raw) {
+  if (!raw || !raw.includes(':')) return raw;
+  const [wcStr, hex] = raw.split(':');
+  const wc = parseInt(wcStr);
+  if (isNaN(wc) || hex.length !== 64) return raw;
+
+  const bytes = new Uint8Array(36);
+  bytes[0] = 0x11; // bounceable, non-testonly
+  bytes[1] = wc & 0xFF;
+  for (let i = 0; i < 32; i++) bytes[2 + i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  const crc = crc16(bytes.slice(0, 34));
+  bytes[34] = (crc >> 8) & 0xFF;
+  bytes[35] = crc & 0xFF;
+
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_');
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // API HELPERS
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -530,6 +561,7 @@ async function gqlPost(query, variables) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query, variables }),
       });
+      // 403 = origin blocked server-side — proxy can fix this too
       if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
       const data = await resp.json();
       if (data.errors) throw new Error(`GraphQL: ${data.errors.map(e => e.message).join("; ")}`);
@@ -537,7 +569,8 @@ async function gqlPost(query, variables) {
     } catch(e) {
       lastErr = e;
       const isNetwork = ["Failed to fetch","Load failed","NetworkError"].some(s => e.message.includes(s));
-      if (isNetwork && url === GETGEMS_GQL && proxy) continue; // retry via proxy
+      const is403 = e.message.includes("403");
+      if ((isNetwork || is403) && url === GETGEMS_GQL && proxy) continue; // retry via proxy
       break;
     }
   }
@@ -562,16 +595,16 @@ async function tonapiResolveNftAddress(colAddr, index) {
       `/blockchain/accounts/${colAddr}/methods/get_nft_address_by_index`,
       { args: String(index) }
     );
-    // tonapi v2 may return decoded address directly
-    if (data?.decoded?.address) return data.decoded.address;
-    // Or inside stack as slice value
+    // tonapi v2 may return decoded address in various formats
+    if (data?.decoded?.address) return rawAddrToEQ(data.decoded.address);
     const stack = data?.stack || [];
     for (const item of stack) {
-      if (item.address) return item.address;
-      if (item.type === "slice" && item.slice?.bytes) {
-        // Raw address bytes — tonapi usually decodes this
-        return null; // skip, not decoded
-      }
+      // Direct address field
+      if (item.address) return rawAddrToEQ(item.address);
+      // "value" field as raw address string
+      if (typeof item.value === "string" && item.value.includes(":")) return rawAddrToEQ(item.value);
+      // Nested decoded
+      if (item.decoded?.address) return rawAddrToEQ(item.decoded.address);
     }
     return null;
   } catch { return null; }
@@ -584,23 +617,35 @@ async function tonapiGetNft(nftAddr) {
   } catch { return null; }
 }
 
-// Parse tonapi NFT item into our attribute format
+// Parse tonapi NFT item into our data format
 function parseTonapiNft(item) {
   if (!item) return null;
   const meta = item.metadata || {};
   const attrs = {};
-  // tonapi attributes: [{trait_type, value}]
   for (const a of meta.attributes || []) {
     const key = String(a.trait_type || a.key || "").toUpperCase().replace(/\s+/g, "_");
     attrs[key] = a.value;
   }
+
+  // tonapi returns sale info when NFT is listed
+  let priceTon = null;
+  let isOnSale = false;
+  const sale = item.sale || item.listed_at;
+  if (sale) {
+    const priceVal = sale.price?.value || sale.fullPrice || sale.price;
+    if (priceVal) {
+      const p = parseInt(priceVal) / NANOTON;
+      if (!isNaN(p) && p > 0) { priceTon = p; isOnSale = true; }
+    }
+  }
+
   return {
-    address:    item.address || null,
+    address:    rawAddrToEQ(item.address) || item.address || null,
     index:      item.index ?? null,
     name:       meta.name || null,
     attributes: attrs,
-    // tonapi also returns sale info in some cases
-    sale:       item.sale || null,
+    priceTon,
+    isOnSale,
     owner:      item.owner?.address || null,
   };
 }
@@ -818,7 +863,7 @@ async function fetchMiner(index, collectionName) {
     dataSource: [],
   };
 
-  // 1. tonapi — primary source for NFT metadata & attributes (no CORS issues)
+  // 1. tonapi — primary source: metadata, attributes, AND sale price
   try {
     const ton = await tonapiGetByIndex(colAddr, index);
     if (ton) {
@@ -826,11 +871,7 @@ async function fetchMiner(index, collectionName) {
       miner.name          = ton.name || `#${index}`;
       miner.baselinePower = parseBaselinePower(ton.attributes);
       miner.baselineEff   = parseEfficiency(ton.attributes);
-      // tonapi may include sale data too
-      if (ton.sale?.price?.value) {
-        miner.priceTon  = parseInt(ton.sale.price.value) / NANOTON;
-        miner.isOnSale  = true;
-      }
+      if (ton.priceTon) { miner.priceTon = ton.priceTon; miner.isOnSale = true; }
       miner.dataSource.push("tonapi ✓");
     } else {
       miner.dataSource.push("tonapi: адрес не разрешён");
@@ -839,31 +880,28 @@ async function fetchMiner(index, collectionName) {
     miner.dataSource.push(`tonapi: ${e.message.substring(0, 50)}`);
   }
 
-  // 2. getgems — for marketplace price (optional, may fail due to CORS)
-  try {
-    const gg = await gqlGetByIndex(colAddr, index);
-    if (gg) {
-      if (!miner.address) miner.address = gg.address;
-      if (!miner.name || miner.name === `#${index}`) miner.name = gg.name || miner.name;
-      miner.isOnSale = !!gg.sale;
-      const price = parsePriceTon(gg);
-      if (price) miner.priceTon = price;
-      // Attributes from getgems as fallback if tonapi didn't have them
-      if (!miner.baselinePower) {
-        const attrs = parseAttrs(gg.attributes);
-        miner.baselinePower = parseBaselinePower(attrs);
-        miner.baselineEff   = parseEfficiency(attrs);
+  // 2. getgems — optional, for price if tonapi didn't return it (may be blocked)
+  if (!miner.priceTon) {
+    try {
+      const gg = await gqlGetByIndex(colAddr, index);
+      if (gg) {
+        if (!miner.address) miner.address = gg.address;
+        if (!miner.name || miner.name === `#${index}`) miner.name = gg.name || miner.name;
+        if (!miner.isOnSale) miner.isOnSale = !!gg.sale;
+        const price = parsePriceTon(gg);
+        if (price) miner.priceTon = price;
+        if (!miner.baselinePower) {
+          const attrs = parseAttrs(gg.attributes);
+          miner.baselinePower = parseBaselinePower(attrs);
+          miner.baselineEff   = parseEfficiency(attrs);
+        }
+        miner.dataSource.push("getgems ✓");
       }
-      miner.dataSource.push("getgems ✓");
+    } catch(e) {
+      const isBlocked = ["Failed to fetch","Load failed","NetworkError","403"].some(s => e.message.includes(s));
+      miner.getgemsError = e.message;
+      miner.dataSource.push(isBlocked ? "getgems: заблокирован" : `getgems: ${e.message.substring(0, 50)}`);
     }
-  } catch(e) {
-    const isNetwork = ["Failed to fetch","Load failed","NetworkError"].some(s => e.message.includes(s));
-    miner.getgemsError = e.message;
-    miner.isCorsError  = isNetwork && !getSettings().corsProxy;
-    miner.dataSource.push(isNetwork
-      ? `getgems: недоступен${getSettings().corsProxy ? " (прокси тоже не помог)" : " (CORS)"}`
-      : `getgems: ${e.message.substring(0, 50)}`
-    );
   }
 
   // 3. GoMining API — real power with upgrades (needs token)
@@ -1050,10 +1088,15 @@ function renderSingleCard(m) {
         <div class="stat-sub">GoMining не вернул данные</div>
       </div>` : "")}
 
-      ${m.priceTon !== null ? `<div class="stat-card stat-yellow">
+      <div class="stat-card stat-yellow">
         <div class="stat-label">Цена</div>
-        <div class="stat-value">${m.priceTon.toFixed(2)} <small style="font-size:14px">TON</small></div>
-      </div>` : ""}
+        ${m.priceTon !== null
+          ? `<div class="stat-value">${m.priceTon.toFixed(2)} <small style="font-size:14px">TON</small></div>
+             <div class="stat-sub">${m.isOnSale ? "На продаже" : "Не выставлен"}</div>`
+          : `<div class="stat-value" style="font-size:15px;color:var(--muted)">—</div>
+             <div class="stat-sub">${m.address ? `<a href="https://getgems.io/nft/${m.address}" target="_blank" style="color:var(--accent2)">Открыть на getgems →</a>` : "нет данных"}</div>`
+        }
+      </div>
 
       ${val !== null ? `<div class="stat-card stat-purple">
         <div class="stat-label">TH / TON</div>
