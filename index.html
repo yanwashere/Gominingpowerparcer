@@ -698,7 +698,8 @@ async function gmGet(path, params = {}) {
         "Accept": "application/json",
       },
     });
-    if (resp.status === 401) throw new Error("401: Токен недействителен или истёк");
+    if (resp.status === 401 || resp.status === 403)
+      throw new Error("401: Токен GoMining истёк — открой GoMining в браузере и обнови токен");
     if (!resp.ok) return null;
     return resp.json();
   } catch(e) {
@@ -1814,9 +1815,10 @@ async function testApis() {
       const testUrl = `${GOMINING_API}/api/nft/get-by-external-url-id?externalUrlId=00000000-0000-0000-0000-000000000000`;
       const url = proxyUrl(testUrl);
       const r = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } });
-      if (r.status === 401)     lines.push(err("GoMining: токен недействителен (401) — получи новый"));
-      else if (r.status === 404 || r.status === 400) lines.push(ok("GoMining API доступен ✓ (токен принят)"));
-      else if (r.ok)             lines.push(ok(`GoMining API доступен (${r.status})`));
+      if (r.status === 401 || r.status === 403)
+        lines.push(err("GoMining: токен истёк или недействителен — обнови токен (он живёт ~1 час)"));
+      else if (r.status === 404 || r.status === 400) lines.push(ok("GoMining API доступен ✓ (токен действителен)"));
+      else if (r.ok)             lines.push(ok(`GoMining API доступен ✓ (${r.status})`));
       else                       lines.push(warn(`GoMining: HTTP ${r.status}`));
     } catch(e) {
       const isNetwork = ["Failed to fetch","Load failed"].some(s => e.message.includes(s));
