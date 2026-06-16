@@ -708,34 +708,28 @@ async function gmGet(path, params = {}) {
 }
 
 // Fetch real miner data from GoMining API.
-// Prefers externalUrlId (UUID from NFT metadata external_url) — the actual endpoint used by the app.
-// Falls back to tokenId-based patterns for resilience.
+// GoMining response includes: power, externalUrlId, NFT address, ROI, etc.
 async function gmFetchMiner(tokenId, externalUrlId) {
   const s = getSettings();
   if (!s.token) return { error: "token_missing" };
 
-  // Primary: /api/nft/get-by-external-url-id?externalUrlId={uuid}
+  // Primary: /api/nft/get-by-token-id — direct lookup by tokenId (same ID shown on getgems)
+  if (tokenId) {
+    let raw = await gmGet(`/api/nft/get-by-token-id`, { tokenId });
+    if (raw) { console.log("[GoMining] found by tokenId:", tokenId); return parseGmData(raw); }
+
+    // Also try path-based variant
+    raw = await gmGet(`/api/v1/nfts/${tokenId}`);
+    if (raw) return parseGmData(raw);
+  }
+
+  // Fallback: /api/nft/get-by-external-url-id — if we already have the UUID
   if (externalUrlId) {
     const raw = await gmGet(`/api/nft/get-by-external-url-id`, { externalUrlId });
     if (raw) return parseGmData(raw);
-    console.log("[GoMining] get-by-external-url-id returned null for", externalUrlId);
-  } else {
-    console.log("[GoMining] no externalUrlId — tonapi metadata may not include external_url");
   }
 
-  // Fallback: /api/v1/nfts/{tokenId}
-  let raw = await gmGet(`/api/v1/nfts/${tokenId}`);
-  if (raw) return parseGmData(raw);
-
-  // Fallback: /api/nft/get-by-token-id
-  raw = await gmGet(`/api/nft/get-by-token-id`, { tokenId });
-  if (raw) return parseGmData(raw);
-
-  // Fallback: /api/nfts/{tokenId}
-  raw = await gmGet(`/api/nfts/${tokenId}`);
-  if (raw) return parseGmData(raw);
-
-  console.log("[GoMining] all endpoints returned null for tokenId=", tokenId);
+  console.log("[GoMining] all endpoints returned null. tokenId=", tokenId, "uuid=", externalUrlId);
   return { error: "not_found", externalUrlId };
 }
 
@@ -882,19 +876,25 @@ function parseGmData(raw) {
   const priceUsdt = parseFloat(d.priceUsdt ?? d.price_usdt);
   const priceTon  = parseFloat(d.priceTon ?? d.price_ton);
 
+  // NFT TON address: GoMining returns it in raw "0:hex" format
+  const rawAddr = d.address || null;
+  const tonAddress = rawAddr ? rawAddrToEQ(rawAddr) : null;
+
   return {
-    power:       isNaN(power)     ? null : power,
-    efficiency:  isNaN(eff)       ? null : eff,
-    priceUsdt:   isNaN(priceUsdt) ? null : priceUsdt,
-    priceTon:    isNaN(priceTon)  ? null : priceTon,
-    isUpgraded:  d.isUpgraded ?? false,
-    level:       d.level ?? null,
-    status:      d.status ?? null,
-    tokenId:     d.tokenId ?? null,
-    internalId:  d.id ?? null,
-    // ROI data
-    roi:         d.roi ?? null,
-    incomeAgg:   d.nftIncomeAggregation ?? null,
+    power:         isNaN(power)     ? null : power,
+    efficiency:    isNaN(eff)       ? null : eff,
+    priceUsdt:     isNaN(priceUsdt) ? null : priceUsdt,
+    priceTon:      isNaN(priceTon)  ? null : priceTon,
+    isUpgraded:    d.isUpgraded ?? false,
+    level:         d.level ?? null,
+    status:        d.status ?? null,
+    tokenId:       d.tokenId ?? null,
+    internalId:    d.id ?? null,
+    externalUrlId: d.externalUrlId ?? null,   // UUID — returned by GoMining in the response!
+    tonAddress,                                // NFT blockchain address from GoMining
+    name:          d.name ?? null,
+    roi:           d.roi ?? null,
+    incomeAgg:     d.nftIncomeAggregation ?? null,
   };
 }
 
@@ -975,7 +975,7 @@ async function fetchMiner(index, collectionName) {
     }
   }
 
-  // 3. GoMining API — real power, efficiency, ROI (needs token)
+  // 3. GoMining API — real power, efficiency, ROI, and NFT address (needs token)
   try {
     const gm = await gmFetchMiner(index, miner.externalUrlId);
     if (gm && !gm.error) {
@@ -989,12 +989,28 @@ async function fetchMiner(index, collectionName) {
       if (gm.priceUsdt) miner.priceUsdt = gm.priceUsdt;
       if (gm.priceTon && !miner.priceTon) miner.priceTon = gm.priceTon;
       if (gm.status === "sale" && !miner.isOnSale) miner.isOnSale = true;
+      // GoMining response includes the NFT's TON address and externalUrlId
+      if (gm.tonAddress && !miner.address) miner.address = gm.tonAddress;
+      if (gm.externalUrlId && !miner.externalUrlId) miner.externalUrlId = gm.externalUrlId;
+      if (gm.name && (!miner.name || miner.name === `#${index}`)) miner.name = gm.name;
       miner.dataSource.push("gomining ✓");
+
+      // If tonapi didn't give us baseline power, try with the NFT address from GoMining
+      if (!miner.baselinePower && gm.tonAddress) {
+        try {
+          const ton = parseTonapiNft(await tonapiGetNft(gm.tonAddress));
+          if (ton) {
+            miner.baselinePower = parseBaselinePower(ton.attributes);
+            miner.baselineEff   = parseEfficiency(ton.attributes);
+            if (ton.priceTon && !miner.priceTon) { miner.priceTon = ton.priceTon; miner.isOnSale = true; }
+            miner.dataSource.push("tonapi(addr) ✓");
+          }
+        } catch(e2) { /* optional */ }
+      }
     } else if (gm?.error === "token_missing") {
       miner.dataSource.push("gomining: токен не задан");
     } else if (gm?.error === "not_found") {
-      const hint = miner.externalUrlId ? `uuid=${miner.externalUrlId.slice(0,8)}…` : "нет uuid в метаданных";
-      miner.dataSource.push(`gomining: нет данных (${hint})`);
+      miner.dataSource.push("gomining: нет данных");
     }
   } catch(e) {
     if (e.message.includes("401")) throw e;
