@@ -350,15 +350,23 @@
   <!-- Tab: Single / List miner lookup -->
   <div id="pane-single">
     <div class="search-box">
-      <h2>Проверить майнер по номеру</h2>
+      <h2>Проверить майнер</h2>
       <div class="input-row">
-        <select id="singleCollection">
-          <option value="auto">Авто (по номеру)</option>
-          <option value="GoMining Digital Miners">Release 1</option>
-          <option value="GoMining Digital Miners: Release 2">Release 2</option>
-        </select>
-        <input type="number" class="main-input" id="singleId" placeholder="Номер майнера, напр. 349973" min="1">
+        <input type="text" class="main-input" id="singleId" style="flex:1"
+          placeholder="URL GoMining / URL getgems / адрес EQ... / индекс в коллекции"
+          onkeydown="if(event.key==='Enter')lookupSingle()">
         <button class="btn btn-primary" onclick="lookupSingle()" id="btnSingle">🔍 Найти</button>
+      </div>
+      <div id="singleCollectionRow" style="margin-top:6px; font-size:12px; color:var(--muted)">
+        Если вводишь просто число — выбери коллекцию:
+        <select id="singleCollection" style="margin-left:6px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-size:12px; padding:3px 8px;">
+          <option value="GoMining Digital Miners: Release 2" selected>Release 2 (по умолчанию)</option>
+          <option value="GoMining Digital Miners">Release 1</option>
+        </select>
+      </div>
+      <div style="font-size:11px; color:var(--muted); margin-top:4px">
+        Примеры: <code>https://app.gomining.com/nft/acea4fac-…</code> или
+        <code>https://getgems.io/nft/EQBy.../5</code> или <code>EQBy...адрес</code> или <code>5</code>
       </div>
     </div>
     <div id="singleStatus" class="hidden"></div>
@@ -987,6 +995,106 @@ async function fetchMiner(index, collectionName) {
   return miner;
 }
 
+// Fetch miner when we have the GoMining externalUrlId UUID directly.
+// Calls GoMining API → then enriches with tonapi data if possible.
+async function fetchMinerByUuid(uuid) {
+  const s = getSettings();
+  if (!s.token) throw new Error("Токен GoMining не задан — добавьте токен в Настройках");
+
+  const raw = await gmGet(`/api/nft/get-by-external-url-id`, { externalUrlId: uuid });
+  if (!raw) throw new Error("GoMining API не вернул данных для этого UUID");
+
+  console.log("[GoMining] full response by UUID:", JSON.stringify(raw, null, 2));
+  const gm = parseGmData(raw);
+  const d  = raw?.data ?? raw;
+
+  // Try to extract TON NFT address from GoMining response (various field names)
+  const tonAddr = d?.nftAddress || d?.blockchainAddress || d?.tonAddress ||
+                  d?.address || d?.ton_address || null;
+
+  const miner = {
+    index:          gm.tokenId || d?.tokenId || null,
+    collectionName: null,
+    externalUrlId:  uuid,
+    name:           d?.name || (gm.tokenId ? `GoMining #${gm.tokenId}` : "GoMining Miner"),
+    address:        tonAddr,
+    baselinePower:  null,
+    realPower:      gm.power,
+    baselineEff:    null,
+    realEff:        gm.efficiency,
+    priceTon:       gm.priceTon,
+    priceUsdt:      gm.priceUsdt,
+    isOnSale:       !!gm.priceTon,
+    isUpgraded:     gm.isUpgraded,
+    gmLevel:        gm.level,
+    gmStatus:       gm.status,
+    roi:            gm.roi,
+    incomeAgg:      gm.incomeAgg,
+    dataSource:     ["gomining ✓ (UUID)"],
+  };
+
+  // Enrich with tonapi data (baseline power, price, collection)
+  if (tonAddr) {
+    try {
+      const ton = parseTonapiNft(await tonapiGetNft(tonAddr));
+      if (ton) {
+        miner.address        = ton.address || miner.address;
+        miner.baselinePower  = parseBaselinePower(ton.attributes);
+        miner.baselineEff    = parseEfficiency(ton.attributes);
+        if (ton.priceTon && !miner.priceTon) { miner.priceTon = ton.priceTon; miner.isOnSale = true; }
+        miner.dataSource.push("tonapi ✓");
+      }
+    } catch(e) { /* tonapi optional */ }
+  }
+
+  return miner;
+}
+
+// Fetch miner by its on-chain TON NFT address (EQ.../UQ...).
+async function fetchMinerByAddress(tonAddr) {
+  const ton = parseTonapiNft(await tonapiGetNft(tonAddr));
+  if (!ton) throw new Error(`tonapi не нашёл NFT по адресу ${tonAddr}`);
+
+  const miner = {
+    index:         ton.index ?? null,
+    collectionName: null,
+    externalUrlId: ton.externalUrlId,
+    name:          ton.name || tonAddr,
+    address:       ton.address || tonAddr,
+    baselinePower: parseBaselinePower(ton.attributes),
+    realPower:     null,
+    baselineEff:   parseEfficiency(ton.attributes),
+    realEff:       null,
+    priceTon:      ton.priceTon,
+    priceUsdt:     null,
+    isOnSale:      ton.isOnSale,
+    isUpgraded:    false,
+    dataSource:    ["tonapi ✓ (адрес)"],
+  };
+
+  // GoMining API
+  try {
+    const gm = await gmFetchMiner(miner.index, ton.externalUrlId);
+    if (gm && !gm.error) {
+      miner.realPower  = gm.power;
+      miner.realEff    = gm.efficiency;
+      miner.isUpgraded = gm.isUpgraded;
+      miner.gmLevel    = gm.level;
+      miner.gmStatus   = gm.status;
+      miner.roi        = gm.roi;
+      miner.incomeAgg  = gm.incomeAgg;
+      if (gm.priceUsdt) miner.priceUsdt = gm.priceUsdt;
+      miner.dataSource.push("gomining ✓");
+    } else if (gm?.error === "not_found") {
+      const hint = ton.externalUrlId ? `uuid=${ton.externalUrlId.slice(0,8)}…` : "нет uuid";
+      miner.dataSource.push(`gomining: нет данных (${hint})`);
+    }
+  } catch(e) { if (e.message.includes("401")) throw e; }
+
+  miner.name = miner.name || tonAddr;
+  return miner;
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // FETCH ALL SALES (PAGINATED)
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1343,20 +1451,69 @@ function esc(s) {
 // ACTIONS
 // ──────────────────────────────────────────────────────────────────────────────
 
+// Parse what the user typed in the single-miner input field.
+// Returns {type, value, collection?}
+function parseSmartInput(raw) {
+  const s = raw.trim();
+  const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+  // GoMining app URL: https://app.gomining.com/nft/{uuid}
+  if (s.includes("gomining.com/nft/")) {
+    const m = s.match(UUID_RE);
+    if (m) return { type: "uuid", value: m[0] };
+  }
+
+  // Raw UUID
+  if (UUID_RE.test(s) && s.length < 50) return { type: "uuid", value: s };
+
+  // getgems URL: https://getgems.io/nft/{EQ...}/{index}
+  const ggMatch = s.match(/getgems\.io\/nft\/([A-Za-z0-9_\-]{40,})[\/](\d+)/);
+  if (ggMatch) return { type: "index", collection: ggMatch[1], value: parseInt(ggMatch[2]) };
+
+  // TON EQ/UQ address
+  if (/^[EU]Q[A-Za-z0-9_\-]{46}$/.test(s)) return { type: "tonAddr", value: s };
+
+  // Plain number → collection index
+  const n = parseInt(s);
+  if (!isNaN(n) && n > 0) return { type: "index", value: n };
+
+  return null;
+}
+
 async function lookupSingle() {
-  const indexStr = document.getElementById("singleId").value.trim();
-  if (!indexStr) return alert("Введите номер майнера");
-  const index = parseInt(indexStr);
-  if (isNaN(index) || index < 1) return alert("Введите корректный номер");
-  const col = document.getElementById("singleCollection").value;
-  const colName = col === "auto" ? null : col;
+  const raw = document.getElementById("singleId").value;
+  if (!raw.trim()) return alert("Введите URL GoMining / getgems / адрес NFT / номер");
+
+  const parsed = parseSmartInput(raw);
+  if (!parsed) return alert("Не удалось распознать ввод. Вставьте URL GoMining, URL getgems, адрес EQ... или просто число.");
 
   document.getElementById("btnSingle").disabled = true;
-  setStatus("singleStatus", "loading", `Запрашиваем данные для майнера #${index}...`);
   document.getElementById("singleResult").innerHTML = "";
 
+  let label = raw.length > 60 ? raw.slice(0, 60) + "…" : raw;
+  setStatus("singleStatus", "loading", `Загружаем: ${label}…`);
+
   try {
-    const miner = await fetchMiner(index, colName);
+    let miner;
+    if (parsed.type === "uuid") {
+      setStatus("singleStatus", "loading", `UUID найден — запрашиваем GoMining API…`);
+      miner = await fetchMinerByUuid(parsed.value);
+    } else if (parsed.type === "tonAddr") {
+      setStatus("singleStatus", "loading", `TON-адрес — запрашиваем tonapi…`);
+      miner = await fetchMinerByAddress(parsed.value);
+    } else {
+      // index — use selected collection
+      const colOverride = parsed.collection || null;
+      const colName = colOverride
+        ? (Object.keys(COLLECTIONS).find(k => COLLECTIONS[k] === colOverride) || colOverride)
+        : document.getElementById("singleCollection").value;
+      setStatus("singleStatus", "loading", `Ищем NFT #${parsed.value} в ${colName || "коллекции"}…`);
+      miner = await fetchMiner(parsed.value, colName);
+      // Warn if resolved NFT doesn't look like a GoMining miner
+      if (miner.name && !/(mine|miner|gomining|digital)/i.test(miner.name) && !miner.baselinePower) {
+        miner.dataSource.push(`⚠ NFT называется "${miner.name}" — возможно неверная коллекция или индекс`);
+      }
+    }
     hideStatus("singleStatus");
     document.getElementById("singleResult").innerHTML = renderSingleCard(miner);
   } catch(e) {
