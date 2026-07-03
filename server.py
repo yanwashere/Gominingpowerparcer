@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -28,6 +29,11 @@ from pathlib import Path
 PORT = 8080
 GOMINING_API = "https://api.gomining.com"
 GOMINING_HOST = "app.gomining.com"
+
+# ── My-miners cache (filled from /api/nft/get-my) ────────────────────────────
+_my_miners_cache: dict | None = None
+_my_miners_cache_ts: float = 0.0
+_MY_MINERS_TTL = 1800  # 30 minutes
 
 # ── Token extraction ──────────────────────────────────────────────────────────
 
@@ -345,6 +351,52 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_json(200, {"ok": False, "uuid": None})
             return
 
+        # ── /gm-my-miners — return cached /api/nft/get-my result ─────────────────
+        if path == "/gm-my-miners":
+            global _my_miners_cache, _my_miners_cache_ts
+            if not Handler.token:
+                self.send_json(401, {"ok": False, "error": "no_token"})
+                return
+            now = time.time()
+            force = qs.get("force", [""])[0] == "1"
+            if not force and _my_miners_cache and (now - _my_miners_cache_ts < _MY_MINERS_TTL):
+                self.send_json(200, {"ok": True, "cached": True, "data": _my_miners_cache})
+                return
+            data = self._gm_request("/api/nft/get-my")
+            if data is None:
+                self.send_json(502, {"ok": False, "error": "GoMining API returned nothing"})
+                return
+            # GoMining wraps the list in {data:[...]} or returns it directly
+            miners_list = data if isinstance(data, list) else (data.get("data") or [])
+            by_address  = {}
+            by_token_id = {}
+            for m in miners_list:
+                addr = m.get("address", "")
+                tid  = m.get("tokenId")
+                uuid = m.get("externalUrlId")
+                if addr and uuid:
+                    by_address[addr.lower()] = m
+                if tid is not None and uuid:
+                    by_token_id[str(tid)] = m
+            _my_miners_cache = {
+                "by_address": by_address,
+                "by_token_id": by_token_id,
+                "count": len(miners_list),
+            }
+            _my_miners_cache_ts = now
+            self.send_json(200, {"ok": True, "cached": False, "data": _my_miners_cache})
+            return
+
+        # ── /gm-by-token-id — look up any miner by tokenId ───────────────────────
+        if path == "/gm-by-token-id":
+            token_id = qs.get("tokenId", [""])[0].strip()
+            if not token_id or not Handler.token:
+                self.send_json(400, {"ok": False, "error": "tokenId and token required"})
+                return
+            result = self._probe_gm_by_token_id(token_id)
+            self.send_json(200, result)
+            return
+
         self.send_json(404, {"error": "not found"})
 
     def _gm_request(self, path: str, params: dict | None = None) -> dict | None:
@@ -387,6 +439,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if data:
                 print(f"[gm] HIT: {endpoint} params={list(params.keys())}")
                 return {"ok": True, "endpoint": endpoint, "params": list(params.keys()), "data": data}
+        return {"ok": False, "tried": len(candidates)}
+
+    def _probe_gm_by_token_id(self, token_id: str) -> dict:
+        """Try GoMining endpoints that accept a tokenId (miner number from name)."""
+        # Collection IDs seen in /api/nft/get-my responses
+        col_ids = [514, 513, 511, 510]
+        candidates = [
+            ("/api/nft/get-by-token-id", {"tokenId": token_id}),
+            ("/api/nft/get-by-token-id", {"token_id": token_id}),
+            ("/api/v1/nfts/by-token-id",  {"tokenId": token_id}),
+        ]
+        # Also try with explicit collection IDs
+        for cid in col_ids:
+            candidates.append(("/api/nft/get-by-token-id", {"tokenId": token_id, "nftCollectionId": cid}))
+        for endpoint, params in candidates:
+            data = self._gm_request(endpoint, params)
+            if data:
+                print(f"[gm] token-id HIT: {endpoint} params={list(params.keys())}")
+                return {"ok": True, "endpoint": endpoint, "data": data}
         return {"ok": False, "tried": len(candidates)}
 
     def _scrape_getgems_uuid(self, nft_addr: str) -> str | None:
