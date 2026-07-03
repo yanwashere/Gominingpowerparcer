@@ -392,6 +392,48 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(200, {"ok": True, "cached": False, "data": _my_miners_cache})
             return
 
+        # ── /gm-market-debug — raw response from marketplace-index (for debugging) ──
+        if path == "/gm-market-debug":
+            if not Handler.token:
+                self.send_json(401, {"error": "no_token"})
+                return
+            raw_params = qs.get("params", [""])[0]  # e.g. ?params=page=1&perPage=50
+            extra = {}
+            if raw_params:
+                for kv in raw_params.split("&"):
+                    if "=" in kv:
+                        k, v = kv.split("=", 1)
+                        extra[k] = v
+            url = GOMINING_API + "/api/nft/marketplace-index"
+            if extra:
+                url += "?" + urllib.parse.urlencode(extra)
+            req = urllib.request.Request(url)
+            req.add_header("Authorization", f"Bearer {Handler.token}")
+            req.add_header("Accept", "application/json")
+            req.add_header("Origin", "https://app.gomining.com")
+            req.add_header("Referer", "https://app.gomining.com/")
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    body = resp.read()
+                    parsed = json.loads(body)
+                    # Return summary so response isn't huge
+                    inner = parsed.get("data", {})
+                    arr = inner.get("array", []) if isinstance(inner, dict) else []
+                    self.send_json(200, {
+                        "status": resp.status,
+                        "top_keys": list(parsed.keys()) if isinstance(parsed, dict) else "list",
+                        "data_keys": list(inner.keys()) if isinstance(inner, dict) else str(type(inner)),
+                        "array_len": len(arr),
+                        "first_item": arr[0] if arr else None,
+                        "url_called": url,
+                    })
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8", errors="replace")
+                self.send_json(e.code, {"http_error": e.code, "body": body[:500], "url": url})
+            except Exception as e:
+                self.send_json(500, {"error": str(e), "url": url})
+            return
+
         # ── /gm-market-scan — scan GoMining marketplace, cache name→miner ──────────
         if path == "/gm-market-scan":
             global _gm_market_cache, _gm_market_cache_ts
@@ -530,39 +572,64 @@ class Handler(http.server.BaseHTTPRequestHandler):
         by_name_num: dict = {}
         by_ext_id:   dict = {}
 
-        for page in range(1, max_pages + 1):
-            params = {"page": page, "perPage": per_page, "limit": per_page}
-            data = self._gm_request(ENDPOINT, params)
-            if data is None:
-                if page == 1:
-                    # Try without params as fallback
-                    data = self._gm_request(ENDPOINT)
+        def _extract_items(data):
+            """Pull the array of miners from any response shape."""
+            if isinstance(data, list):
+                return data
+            if not isinstance(data, dict):
+                return []
+            # {"data": {"array": [...]}}
+            inner = data.get("data")
+            if isinstance(inner, dict):
+                arr = inner.get("array") or inner.get("items") or inner.get("nfts") or []
+                if arr:
+                    return arr, inner
+            # {"array": [...]}
+            arr = data.get("array") or data.get("items") or data.get("nfts") or []
+            return arr, data
+
+        # Try without pagination params first (simplest call)
+        data0 = self._gm_request(ENDPOINT)
+        if data0 is not None:
+            items0, meta0 = _extract_items(data0) if isinstance(_extract_items(data0), tuple) else (_extract_items(data0), {})
+            for m in items0:
+                self._index_market_miner(m, by_name_num, by_ext_id, _re)
+            print(f"[marketplace] no-param call: {len(items0)} items")
+            total = meta0.get("total") or meta0.get("count") if isinstance(meta0, dict) else None
+            # Only paginate if we got a full page and there's more
+            if len(items0) >= 50:
+                for page in range(2, max_pages + 1):
+                    params = {"page": page, "perPage": per_page, "limit": per_page, "offset": (page-1)*per_page}
+                    data = self._gm_request(ENDPOINT, params)
+                    if data is None:
+                        break
+                    result = _extract_items(data)
+                    items = result[0] if isinstance(result, tuple) else result
+                    if not items:
+                        break
+                    for m in items:
+                        self._index_market_miner(m, by_name_num, by_ext_id, _re)
+                    print(f"[marketplace] page {page}: {len(items)} items (total: {len(by_name_num)})")
+                    if total and len(by_name_num) >= total:
+                        break
+                    if len(items) < per_page:
+                        break
+        else:
+            # Fallback: try with explicit pagination params
+            for page in range(1, max_pages + 1):
+                params = {"page": page, "perPage": per_page, "limit": per_page}
+                data = self._gm_request(ENDPOINT, params)
                 if data is None:
                     break
-
-            # Response shape: {"data": {"array": [...], "total": N, ...}}
-            inner = data.get("data") if isinstance(data, dict) else {}
-            items = (
-                inner.get("array") if isinstance(inner, dict) else None
-            ) or (
-                data.get("array") or []
-                if isinstance(data, dict) else data if isinstance(data, list) else []
-            )
-
-            if not items:
-                break
-
-            for m in items:
-                self._index_market_miner(m, by_name_num, by_ext_id, _re)
-
-            print(f"[marketplace] page {page}: {len(items)} items (total indexed: {len(by_name_num)})")
-
-            # Stop if last page
-            total = inner.get("total") or inner.get("count") if isinstance(inner, dict) else None
-            if total and len(by_name_num) >= total:
-                break
-            if len(items) < per_page:
-                break
+                result = _extract_items(data)
+                items = result[0] if isinstance(result, tuple) else result
+                if not items:
+                    break
+                for m in items:
+                    self._index_market_miner(m, by_name_num, by_ext_id, _re)
+                print(f"[marketplace] page {page}: {len(items)} items (total: {len(by_name_num)})")
+                if len(items) < per_page:
+                    break
 
         if not by_name_num and not by_ext_id:
             return None
