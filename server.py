@@ -35,6 +35,11 @@ _my_miners_cache: dict | None = None
 _my_miners_cache_ts: float = 0.0
 _MY_MINERS_TTL = 1800  # 30 minutes
 
+# ── GoMining marketplace cache (filled from marketplace listing API) ───────────
+_gm_market_cache: dict | None = None  # {"by_name_num": {"213775": miner, ...}, "count": N}
+_gm_market_cache_ts: float = 0.0
+_GM_MARKET_TTL = 900  # 15 minutes (listings change more often)
+
 # ── Token extraction ──────────────────────────────────────────────────────────
 
 def _safari_cookies_db() -> Path | None:
@@ -387,6 +392,53 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(200, {"ok": True, "cached": False, "data": _my_miners_cache})
             return
 
+        # ── /gm-market-scan — scan GoMining marketplace, cache name→miner ──────────
+        if path == "/gm-market-scan":
+            global _gm_market_cache, _gm_market_cache_ts
+            if not Handler.token:
+                self.send_json(401, {"ok": False, "error": "no_token"})
+                return
+            now = time.time()
+            force = qs.get("force", [""])[0] == "1"
+            if not force and _gm_market_cache and (now - _gm_market_cache_ts < _GM_MARKET_TTL):
+                self.send_json(200, {"ok": True, "cached": True, "data": _gm_market_cache})
+                return
+            result = self._scan_gm_marketplace()
+            if result is None:
+                self.send_json(502, {"ok": False, "error": "Could not reach GoMining marketplace API"})
+                return
+            _gm_market_cache = result
+            _gm_market_cache_ts = now
+            self.send_json(200, {"ok": True, "cached": False, "data": _gm_market_cache})
+            return
+
+        # ── /gm-lookup-by-name — look up a miner by its name number ──────────────
+        if path == "/gm-lookup-by-name":
+            name = qs.get("name", [""])[0].strip()  # e.g. "MINEBOX 213775" or "213775"
+            if not name or not Handler.token:
+                self.send_json(400, {"ok": False, "error": "name and token required"})
+                return
+            import re as _re
+            num_match = _re.search(r"\d{4,7}", name)
+            if not num_match:
+                self.send_json(400, {"ok": False, "error": "no number found in name"})
+                return
+            num = num_match.group(0)
+            # Ensure marketplace cache is loaded
+            now = time.time()
+            if not _gm_market_cache or (now - _gm_market_cache_ts >= _GM_MARKET_TTL):
+                result = self._scan_gm_marketplace()
+                if result:
+                    _gm_market_cache = result
+                    _gm_market_cache_ts = now
+            if _gm_market_cache:
+                miner = _gm_market_cache.get("by_name_num", {}).get(num)
+                if miner:
+                    self.send_json(200, {"ok": True, "found": True, "data": miner})
+                    return
+            self.send_json(200, {"ok": True, "found": False, "num": num})
+            return
+
         # ── /gm-by-token-id — look up any miner by tokenId ───────────────────────
         if path == "/gm-by-token-id":
             token_id = qs.get("tokenId", [""])[0].strip()
@@ -443,8 +495,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _probe_gm_by_token_id(self, token_id: str) -> dict:
         """Try GoMining endpoints that accept a tokenId (miner number from name)."""
-        # Collection IDs seen in /api/nft/get-my responses
-        col_ids = [514, 513, 511, 510]
+        # All known nftCollectionIds seen in responses (244 = older virtual; 510-514 = TON-minted)
+        col_ids = [514, 513, 511, 510, 244, 245, 246, 512]
         candidates = [
             ("/api/nft/get-by-token-id", {"tokenId": token_id}),
             ("/api/nft/get-by-token-id", {"token_id": token_id}),
@@ -459,6 +511,82 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 print(f"[gm] token-id HIT: {endpoint} params={list(params.keys())}")
                 return {"ok": True, "endpoint": endpoint, "data": data}
         return {"ok": False, "tried": len(candidates)}
+
+    def _scan_gm_marketplace(self, max_pages: int = 20, per_page: int = 100) -> dict | None:
+        """
+        Scan GoMining marketplace listing API.
+        Returns {"by_name_num": {"213775": miner, ...}, "count": N} or None if not reachable.
+        Probes several candidate endpoint patterns.
+        """
+        import re as _re
+        # Candidate paginated endpoints for GoMining marketplace listings
+        endpoints = [
+            ("/api/marketplace/nft",        {"page": 1, "limit": per_page, "status": "available"}),
+            ("/api/marketplace/nft",        {"page": 1, "limit": per_page, "available": "true"}),
+            ("/api/nft/marketplace",         {"page": 1, "limit": per_page}),
+            ("/api/nft/get-marketplace",     {"page": 1, "limit": per_page}),
+            ("/api/marketplace/listings",    {"page": 1, "limit": per_page}),
+            ("/api/nft",                     {"page": 1, "limit": per_page, "status": "available", "marketplace": "gmt-secondary"}),
+            ("/api/marketplace",             {"page": 1, "limit": per_page, "status": "available"}),
+        ]
+
+        by_name_num: dict = {}
+        working_endpoint: str | None = None
+        working_params: dict = {}
+
+        # Find a working endpoint by trying page 1
+        for ep, params in endpoints:
+            data = self._gm_request(ep, params)
+            if data is None:
+                continue
+            # Extract items list from various response shapes
+            items = (
+                data if isinstance(data, list) else
+                data.get("data") or data.get("items") or data.get("nfts") or
+                data.get("listings") or data.get("results") or []
+            )
+            if not isinstance(items, list) or len(items) == 0:
+                continue
+            # Validate first item looks like a miner (has externalUrlId or power)
+            first = items[0] if items else {}
+            if not (first.get("externalUrlId") or first.get("power") or first.get("name")):
+                continue
+            print(f"[marketplace] found working endpoint: {ep} → {len(items)} items on page 1")
+            working_endpoint = ep
+            working_params = {k: v for k, v in params.items() if k != "page"}
+            # Index page 1
+            for m in items:
+                self._index_market_miner(m, by_name_num, _re)
+            # Paginate further
+            total_pages = data.get("totalPages") or data.get("pages") or max_pages if isinstance(data, dict) else max_pages
+            for pg in range(2, min(int(total_pages) + 1, max_pages + 1)):
+                page_data = self._gm_request(working_endpoint, {**working_params, "page": pg})
+                if not page_data:
+                    break
+                page_items = (
+                    page_data if isinstance(page_data, list) else
+                    page_data.get("data") or page_data.get("items") or
+                    page_data.get("nfts") or page_data.get("results") or []
+                )
+                if not page_items:
+                    break
+                for m in page_items:
+                    self._index_market_miner(m, by_name_num, _re)
+            break
+
+        if not working_endpoint and not by_name_num:
+            return None
+
+        print(f"[marketplace] indexed {len(by_name_num)} unique miners")
+        return {"by_name_num": by_name_num, "count": len(by_name_num), "endpoint": working_endpoint}
+
+    @staticmethod
+    def _index_market_miner(m: dict, index: dict, re_mod) -> None:
+        """Extract name-number from a marketplace miner entry and add to index."""
+        name = m.get("name", "")
+        match = re_mod.search(r"\d{4,7}", name)
+        if match:
+            index[match.group(0)] = m
 
     def _scrape_getgems_uuid(self, nft_addr: str) -> str | None:
         """Fetch the getgems NFT page and extract GoMining externalUrlId (UUID)."""

@@ -305,6 +305,8 @@
     <span id="myMinersBadge" style="opacity:.75; font-size:11px;"></span>
     <button onclick="refreshLocalToken()" style="margin-left:auto; background:rgba(255,255,255,.25); border:none; color:#fff; padding:3px 10px; border-radius:5px; cursor:pointer; font-size:12px;">↺ Обновить токен</button>
     <button onclick="reloadMyMiners()" style="background:rgba(255,255,255,.25); border:none; color:#fff; padding:3px 10px; border-radius:5px; cursor:pointer; font-size:12px;" title="Обновить кэш ваших майнеров">↺ Мои майнеры</button>
+    <button onclick="reloadMarketScan()" style="background:rgba(255,255,255,.25); border:none; color:#fff; padding:3px 10px; border-radius:5px; cursor:pointer; font-size:12px;" title="Сканировать GoMining маркетплейс (для чужих майнеров)">↺ Маркет</button>
+    <span id="marketBadge" style="opacity:.75; font-size:11px;"></span>
   </div>
 
   <!-- Settings Panel -->
@@ -1310,6 +1312,28 @@ async function fetchMinerByAddress(tonAddr) {
     } catch(e2) { /* optional */ }
   }
 
+  if (!uuid && IS_LOCAL && miner.name) {
+    // Strategy 1b: look up by miner name in GoMining marketplace scan cache
+    try {
+      const r = await fetch(`/gm-lookup-by-name?name=${encodeURIComponent(miner.name)}`);
+      const j = await r.json();
+      if (j.ok && j.found && j.data) {
+        console.log("[gm-market-scan] found by name:", miner.name);
+        const gm = parseGmData(j.data);
+        miner.realPower  = gm.power;
+        miner.realEff    = gm.efficiency;
+        miner.isUpgraded = gm.isUpgraded;
+        miner.gmLevel    = gm.level;
+        miner.roi        = gm.roi;
+        if (gm.priceUsdt) miner.priceUsdt = gm.priceUsdt;
+        if (gm.externalUrlId) { uuid = gm.externalUrlId; miner.externalUrlId = uuid; }
+        miner.dataSource.push("gomining ✓ (маркет)");
+        miner.name = miner.name || tonAddr;
+        return miner;
+      }
+    } catch(e2) { /* optional */ }
+  }
+
   if (!uuid && IS_LOCAL && ton.rawAddress) {
     // Strategy 1b: GoMining API by raw blockchain address (probe multiple endpoints)
     try {
@@ -2166,6 +2190,26 @@ async function initLocalMode() {
 
   // Load user's own miners cache in the background (gives us address→UUID mapping)
   loadMyMinersCacheIfNeeded().catch(() => {});
+}
+
+async function reloadMarketScan() {
+  const badge = document.getElementById("marketBadge");
+  if (badge) badge.textContent = "сканируем маркет…";
+  try {
+    const r = await fetch("/gm-market-scan?force=1");
+    const j = await r.json();
+    if (j.ok && j.data) {
+      if (badge) badge.textContent = `(маркет: ${j.data.count} майнеров)`;
+      showToast(`✅ Маркет GoMining: ${j.data.count} майнеров загружено`);
+      if (j.data.endpoint) console.log("[market] endpoint:", j.data.endpoint);
+    } else {
+      if (badge) badge.textContent = "";
+      showToast("⚠ GoMining маркет недоступен — эндпоинт не найден");
+    }
+  } catch(e) {
+    if (badge) badge.textContent = "";
+    showToast("❌ Ошибка сканирования маркета");
+  }
 }
 
 async function reloadMyMiners() {
