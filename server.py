@@ -302,6 +302,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(content)
             return
 
+        # ── /gm-by-address — probe GoMining API for miner by blockchain address ──
+        if path == "/gm-by-address":
+            addr = qs.get("addr", [""])[0].strip()  # 0:hex format
+            if not addr or not Handler.token:
+                self.send_json(400, {"error": "addr and token required"})
+                return
+            result = self._probe_gm_by_address(addr)
+            self.send_json(200, result)
+            return
+
         # ── /tonapi-debug — return raw tonapi NFT response for debugging ─────────
         if path == "/tonapi-debug":
             addr = qs.get("addr", [""])[0].strip()
@@ -336,6 +346,48 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         self.send_json(404, {"error": "not found"})
+
+    def _gm_request(self, path: str, params: dict | None = None) -> dict | None:
+        """Make a single GoMining API GET request, return parsed JSON or None."""
+        url = GOMINING_API + path
+        if params:
+            url += "?" + urllib.parse.urlencode(params)
+        req = urllib.request.Request(url)
+        req.add_header("Authorization", f"Bearer {Handler.token}")
+        req.add_header("Accept", "application/json")
+        req.add_header("Origin", "https://app.gomining.com")
+        req.add_header("Referer", "https://app.gomining.com/")
+        try:
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                if resp.status == 200:
+                    return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if e.code not in (400, 404):
+                print(f"[gm] {path} → HTTP {e.code}")
+        except Exception:
+            pass
+        return None
+
+    def _probe_gm_by_address(self, raw_addr: str) -> dict:
+        """Try every plausible GoMining endpoint that accepts a blockchain address."""
+        candidates = [
+            ("/api/nft/get-by-address",          {"address": raw_addr}),
+            ("/api/nft/get-by-nft-address",       {"address": raw_addr}),
+            ("/api/nft/get-by-ton-address",        {"address": raw_addr}),
+            ("/api/nft/get-by-blockchain-address", {"address": raw_addr}),
+            ("/api/nft/by-address",                {"address": raw_addr}),
+            ("/api/nft",                           {"address": raw_addr}),
+            ("/api/v1/nfts/by-address",            {"address": raw_addr}),
+            ("/api/nft/get-by-address",            {"nftAddress": raw_addr}),
+            ("/api/nft/get-by-address",            {"blockchainAddress": raw_addr}),
+            ("/api/nft/get-by-address",            {"tonAddress": raw_addr}),
+        ]
+        for endpoint, params in candidates:
+            data = self._gm_request(endpoint, params)
+            if data:
+                print(f"[gm] HIT: {endpoint} params={list(params.keys())}")
+                return {"ok": True, "endpoint": endpoint, "params": list(params.keys()), "data": data}
+        return {"ok": False, "tried": len(candidates)}
 
     def _scrape_getgems_uuid(self, nft_addr: str) -> str | None:
         """Fetch the getgems NFT page and extract GoMining externalUrlId (UUID)."""

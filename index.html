@@ -1195,9 +1195,39 @@ async function fetchMinerByAddress(tonAddr) {
     dataSource:    ["tonapi ✓ (адрес)"],
   };
 
-  // If tonapi didn't give us UUID, try scraping getgems page (local server only)
+  // If tonapi didn't give us UUID, try multiple strategies (local server only)
   let uuid = ton.externalUrlId;
+
+  if (!uuid && IS_LOCAL && ton.rawAddress) {
+    // Strategy 1: GoMining API by raw blockchain address (probe multiple endpoints)
+    try {
+      const r = await fetch(`/gm-by-address?addr=${encodeURIComponent(ton.rawAddress)}`);
+      const j = await r.json();
+      if (j.ok && j.data) {
+        console.log("[gm-by-address] found! endpoint:", j.endpoint);
+        const gm = parseGmData(j.data);
+        miner.realPower  = gm.power;
+        miner.realEff    = gm.efficiency;
+        miner.isUpgraded = gm.isUpgraded;
+        miner.gmLevel    = gm.level;
+        miner.roi        = gm.roi;
+        if (gm.priceUsdt) miner.priceUsdt = gm.priceUsdt;
+        if (gm.externalUrlId) { uuid = gm.externalUrlId; miner.externalUrlId = uuid; }
+        miner.dataSource.push(`gomining ✓ (addr→${j.endpoint.split("/").pop()})`);
+        // Get baseline from tonapi if not yet available
+        if (!miner.baselinePower && gm.tonAddress) {
+          try {
+            const t2 = parseTonapiNft(await tonapiGetNft(gm.tonAddress));
+            if (t2) { miner.baselinePower = parseBaselinePower(t2.attributes); }
+          } catch(e3) {}
+        }
+        return miner;  // early return — we have everything
+      }
+    } catch(e2) { /* optional */ }
+  }
+
   if (!uuid && IS_LOCAL && tonAddr) {
+    // Strategy 2: scrape getgems HTML page for UUID
     try {
       const r = await fetch(`/getgems-uuid?addr=${encodeURIComponent(tonAddr)}`);
       const j = await r.json();
