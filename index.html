@@ -815,8 +815,7 @@ async function gmGet(path, params = {}) {
           throw new Error("401: Токен GoMining не найден — вставьте его в Настройки или перезапустите сервер");
         throw new Error("401: Токен GoMining истёк — открой GoMining в браузере и обнови токен");
       }
-      if (resp.status === 403)
-        throw new Error("401: Токен GoMining истёк — открой GoMining в браузере и обнови токен");
+      // 403 = endpoint forbidden (not a token problem) — skip silently
       if (!resp.ok) return null;
       return resp.json();
     } catch(e) {
@@ -839,7 +838,7 @@ async function gmGet(path, params = {}) {
         "Accept": "application/json",
       },
     });
-    if (resp.status === 401 || resp.status === 403)
+    if (resp.status === 401)
       throw new Error("401: Токен GoMining истёк — открой GoMining в браузере и обнови токен");
     if (!resp.ok) return null;
     return resp.json();
