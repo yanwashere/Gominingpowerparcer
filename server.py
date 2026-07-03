@@ -321,6 +321,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             req.add_header("Accept", "application/json")
             req.add_header("Origin", "https://getgems.io")
             req.add_header("Referer", "https://getgems.io/")
+            req.add_header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+            req.add_header("Accept-Language", "en-US,en;q=0.9")
+            req.add_header("sec-ch-ua", '"Google Chrome";v="125"')
+            req.add_header("sec-ch-ua-platform", '"macOS"')
             try:
                 with urllib.request.urlopen(req, timeout=15) as resp:
                     resp_body = resp.read()
