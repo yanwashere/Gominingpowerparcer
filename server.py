@@ -534,6 +534,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
             pass
         return None
 
+    def _gm_post(self, path: str, body: dict) -> dict | None:
+        """Make a GoMining API POST request with JSON body, return parsed JSON or None."""
+        url = GOMINING_API + path
+        data = json.dumps(body).encode()
+        req = urllib.request.Request(url, data=data, method="POST")
+        req.add_header("Authorization", f"Bearer {Handler.token}")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Accept", "application/json")
+        req.add_header("Origin", "https://app.gomining.com")
+        req.add_header("Referer", "https://app.gomining.com/")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                if resp.status == 200:
+                    return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            print(f"[gm POST] {path} → HTTP {e.code}: {e.read()[:200]}")
+        except Exception as ex:
+            print(f"[gm POST] {path} → {ex}")
+        return None
+
     def _probe_gm_by_address(self, raw_addr: str) -> dict:
         """Try every plausible GoMining endpoint that accepts a blockchain address."""
         candidates = [
@@ -574,10 +594,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return {"ok": True, "endpoint": endpoint, "data": data}
         return {"ok": False, "tried": len(candidates)}
 
-    def _scan_gm_marketplace(self, max_pages: int = 30, per_page: int = 200) -> dict | None:
+    def _scan_gm_marketplace(self, max_pages: int = 50, per_page: int = 100) -> dict | None:
         """
-        Scan GoMining marketplace via /api/nft/marketplace-index.
-        Returns {"by_name_num": {"4806": miner, ...}, "by_ext_id": {uuid: miner}, "count": N}
+        Scan GoMining marketplace via POST /api/nft/marketplace-index.
+        Returns {"by_name_num": {"4806": miner, ...}, "by_ext_id": {ext_id: miner}, "count": N}
         """
         import re as _re
         ENDPOINT = "/api/nft/marketplace-index"
@@ -585,64 +605,80 @@ class Handler(http.server.BaseHTTPRequestHandler):
         by_name_num: dict = {}
         by_ext_id:   dict = {}
 
-        def _extract_items(data):
-            """Pull the array of miners from any response shape."""
+        def _extract(data) -> tuple[list, dict]:
+            """Return (items_list, meta_dict) from any response shape."""
             if isinstance(data, list):
-                return data
+                return data, {}
             if not isinstance(data, dict):
-                return []
-            # {"data": {"array": [...]}}
+                return [], {}
             inner = data.get("data")
             if isinstance(inner, dict):
                 arr = inner.get("array") or inner.get("items") or inner.get("nfts") or []
-                if arr:
-                    return arr, inner
-            # {"array": [...]}
-            arr = data.get("array") or data.get("items") or data.get("nfts") or []
-            return arr, data
+                return (arr if isinstance(arr, list) else []), inner
+            arr = data.get("array") or data.get("items") or []
+            return (arr if isinstance(arr, list) else []), data
 
-        # Try without pagination params first (simplest call)
-        data0 = self._gm_request(ENDPOINT)
-        if data0 is not None:
-            items0, meta0 = _extract_items(data0) if isinstance(_extract_items(data0), tuple) else (_extract_items(data0), {})
-            for m in items0:
-                self._index_market_miner(m, by_name_num, by_ext_id, _re)
-            print(f"[marketplace] no-param call: {len(items0)} items")
-            total = meta0.get("total") or meta0.get("count") if isinstance(meta0, dict) else None
-            # Only paginate if we got a full page and there's more
-            if len(items0) >= 50:
-                for page in range(2, max_pages + 1):
-                    params = {"page": page, "perPage": per_page, "limit": per_page, "offset": (page-1)*per_page}
-                    data = self._gm_request(ENDPOINT, params)
-                    if data is None:
-                        break
-                    result = _extract_items(data)
-                    items = result[0] if isinstance(result, tuple) else result
-                    if not items:
-                        break
-                    for m in items:
-                        self._index_market_miner(m, by_name_num, by_ext_id, _re)
-                    print(f"[marketplace] page {page}: {len(items)} items (total: {len(by_name_num)})")
-                    if total and len(by_name_num) >= total:
-                        break
-                    if len(items) < per_page:
-                        break
-        else:
-            # Fallback: try with explicit pagination params
-            for page in range(1, max_pages + 1):
-                params = {"page": page, "perPage": per_page, "limit": per_page}
-                data = self._gm_request(ENDPOINT, params)
-                if data is None:
-                    break
-                result = _extract_items(data)
-                items = result[0] if isinstance(result, tuple) else result
-                if not items:
-                    break
-                for m in items:
+        # Page-body variants to try (GoMining browser sends 444 bytes so there's a body)
+        def _make_body(page: int) -> dict:
+            return {
+                "page": page,
+                "perPage": per_page,
+                "limit": per_page,
+                "offset": (page - 1) * per_page,
+                "filters": {},
+                "sort": {},
+            }
+
+        total_known: int | None = None
+
+        for page in range(1, max_pages + 1):
+            body = _make_body(page) if page > 1 else {}   # try empty body first
+            data = self._gm_post(ENDPOINT, body)
+
+            # If empty body only returned 20, retry with explicit perPage
+            if page == 1 and data is not None:
+                items0, meta0 = _extract(data)
+                total_known = meta0.get("total") or meta0.get("count") or meta0.get("totalCount")
+                if total_known:
+                    try: total_known = int(total_known)
+                    except: total_known = None
+                for m in items0:
                     self._index_market_miner(m, by_name_num, by_ext_id, _re)
-                print(f"[marketplace] page {page}: {len(items)} items (total: {len(by_name_num)})")
-                if len(items) < per_page:
+                print(f"[marketplace] page 1 (empty body): {len(items0)} items, total={total_known}")
+                # If first page returned less than per_page, try again with explicit body
+                if len(items0) < per_page:
+                    data2 = self._gm_post(ENDPOINT, _make_body(1))
+                    if data2:
+                        items2, meta2 = _extract(data2)
+                        if len(items2) > len(items0):
+                            # Explicit body gives more — use it
+                            by_name_num.clear(); by_ext_id.clear()
+                            for m in items2: self._index_market_miner(m, by_name_num, by_ext_id, _re)
+                            total_known = meta2.get("total") or meta2.get("count") or total_known
+                            print(f"[marketplace] page 1 (explicit body): {len(items2)} items")
+                            if len(items2) < per_page:
+                                break  # no more pages
+                            continue
+                if len(items0) < per_page:
                     break
+                continue
+
+            if data is None:
+                print(f"[marketplace] page {page} returned None — stopping")
+                break
+
+            items, meta = _extract(data)
+            if not items:
+                break
+
+            for m in items:
+                self._index_market_miner(m, by_name_num, by_ext_id, _re)
+            print(f"[marketplace] page {page}: {len(items)} items (total indexed: {len(by_name_num)})")
+
+            if total_known and len(by_name_num) >= total_known:
+                break
+            if len(items) < per_page:
+                break
 
         if not by_name_num and not by_ext_id:
             return None
