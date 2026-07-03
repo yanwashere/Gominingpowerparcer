@@ -523,58 +523,98 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         self.send_json(404, {"error": "not found"})
 
+    @staticmethod
+    def _getgems_headers() -> dict:
+        return {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Origin": "https://getgems.io",
+            "Referer": "https://getgems.io/",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+            "sec-ch-ua": '"Google Chrome";v="125"',
+            "sec-ch-ua-platform": '"macOS"',
+        }
+
     def _debug_getgems_nft(self, nft_addr: str) -> dict:
-        """Query getgems GraphQL for an NFT address, return raw data + extracted fields."""
+        """Query getgems for an NFT address via GraphQL + public REST API."""
         import re as _re
         UUID_RE = _re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", _re.I)
 
-        # Broad query — request every field that might hold an external URL or UUID
+        results = {}
+
+        # ── 1. GraphQL (same query as the browser uses, only valid fields) ────────
         query = """
 query Q($address: String!) {
   alphaNftItem(address: $address) {
-    address index name description
-    externalLink externalUrl contentUrl url
+    address index name description externalLink
     attributes { key value }
     sale { ... on NftSaleFix { fullPrice } }
-    content { ... on NftContentImage { preview { url } } }
-    collection { name address }
   }
 }"""
-        body = json.dumps({"query": query, "variables": {"address": nft_addr}}).encode()
-        req = urllib.request.Request("https://api.getgems.io/graphql", data=body, method="POST")
-        req.add_header("Content-Type", "application/json")
-        req.add_header("Accept", "application/json")
-        req.add_header("Origin", "https://getgems.io")
-        req.add_header("Referer", "https://getgems.io/")
-        req.add_header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
-        req.add_header("Accept-Language", "en-US,en;q=0.9")
-
+        gql_body = json.dumps({"query": query, "variables": {"address": nft_addr}}).encode()
+        gql_req = urllib.request.Request("https://api.getgems.io/graphql", data=gql_body, method="POST")
+        for k, v in self._getgems_headers().items():
+            gql_req.add_header(k, v)
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                raw = json.loads(resp.read())
+            with urllib.request.urlopen(gql_req, timeout=15) as resp:
+                gql_raw = json.loads(resp.read())
+            item = gql_raw.get("data", {}).get("alphaNftItem") or {}
+            all_text = json.dumps(item)
+            results["graphql"] = {
+                "ok": True,
+                "item": item,
+                "item_keys": list(item.keys()),
+                "external_link": item.get("externalLink"),
+                "uuids_found": list(set(UUID_RE.findall(all_text))),
+                "gomining_urls": _re.findall(r"https?://[^\s\"'<>]*gomining[^\s\"'<>]*", all_text, _re.I),
+                "errors": gql_raw.get("errors", []),
+            }
         except urllib.error.HTTPError as e:
-            return {"ok": False, "http_status": e.code, "body": e.read().decode()[:500]}
+            results["graphql"] = {"ok": False, "http_status": e.code, "body": e.read().decode()[:300]}
         except Exception as ex:
-            return {"ok": False, "error": str(ex)}
+            results["graphql"] = {"ok": False, "error": str(ex)}
 
-        # Extract interesting fields for easy inspection
-        item = raw.get("data", {}).get("alphaNftItem") or {}
-        errors = raw.get("errors", [])
+        # ── 2. getgems public REST API (https://getgems.io/public-api) ────────────
+        # Try known REST endpoints that getgems advertises
+        rest_urls = [
+            f"https://api.getgems.io/v2/nft/item/{nft_addr}",
+            f"https://api.getgems.io/v2/nft/{nft_addr}",
+            f"https://api.getgems.io/v1/nft/{nft_addr}",
+        ]
+        for url in rest_urls:
+            rest_req = urllib.request.Request(url)
+            for k, v in self._getgems_headers().items():
+                rest_req.add_header(k, v)
+            try:
+                with urllib.request.urlopen(rest_req, timeout=10) as resp:
+                    rest_raw = json.loads(resp.read())
+                all_text = json.dumps(rest_raw)
+                results["rest"] = {
+                    "ok": True,
+                    "url": url,
+                    "data": rest_raw,
+                    "uuids_found": list(set(UUID_RE.findall(all_text))),
+                    "gomining_urls": _re.findall(r"https?://[^\s\"'<>]*gomining[^\s\"'<>]*", all_text, _re.I),
+                    "external_link": rest_raw.get("externalLink") or rest_raw.get("external_url") or rest_raw.get("external_link"),
+                }
+                break
+            except urllib.error.HTTPError as e:
+                results[f"rest_{url.split('/')[-2]}"] = {"ok": False, "http_status": e.code}
+            except Exception as ex:
+                results[f"rest_err"] = {"ok": False, "error": str(ex)[:80]}
 
-        # Collect all string values that look like URLs or contain gomining
-        all_text = json.dumps(item)
-        uuid_found = UUID_RE.findall(all_text)
-        gomining_urls = _re.findall(r"https?://[^\s\"'<>]*gomining[^\s\"'<>]*", all_text, _re.I)
+        # ── Summary ───────────────────────────────────────────────────────────────
+        all_uuids = set()
+        for v in results.values():
+            if isinstance(v, dict):
+                all_uuids.update(v.get("uuids_found", []))
 
         return {
             "ok": True,
-            "raw": raw,
-            "item_keys": list(item.keys()),
-            "item": item,
-            "errors": errors,
-            "uuids_found": list(set(uuid_found)),
-            "gomining_urls": gomining_urls,
-            "external_link": item.get("externalLink") or item.get("externalUrl") or item.get("url") or None,
+            "addr": nft_addr,
+            "uuids_found": list(all_uuids),
+            "results": results,
         }
 
     def _gm_request(self, path: str, params: dict | None = None) -> dict | None:

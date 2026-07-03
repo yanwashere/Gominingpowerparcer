@@ -2229,17 +2229,21 @@ async function testApis() {
     try {
       const r = await fetch(`/debug-getgems-nft?addr=${encodeURIComponent(testNft)}`);
       const j = await r.json();
-      if (!j.ok) {
-        lines.push(warn(`getgems NFT lookup: ошибка ${j.http_status || j.error || "?"}`));
-      } else if (j.errors?.length) {
-        lines.push(warn(`getgems NFT lookup: GraphQL ошибка — ${j.errors[0]?.message?.substring(0,80)}`));
-      } else if (j.uuids_found?.length) {
-        lines.push(ok(`getgems externalLink: UUID найден → ${j.uuids_found[0]} 🎉`));
-      } else if (j.external_link) {
-        lines.push(warn(`getgems externalLink: ${j.external_link.substring(0,80)} (UUID не распознан)`));
+      const gql = j.results?.graphql;
+      const restR = j.results?.rest;
+      if (j.uuids_found?.length) {
+        lines.push(ok(`getgems: UUID найден → ${j.uuids_found[0]} 🎉`));
+      } else if (gql && !gql.ok) {
+        const gqlErr = gql.body?.substring(0,120) || `HTTP ${gql.http_status}`;
+        const restOk = restR?.ok;
+        lines.push(warn(`getgems GraphQL заблокирован (${gql.http_status})${restOk ? " — REST API отвечает" : " — REST тоже недоступен"}. Подробнее: «🔎 Debug getgems NFT»`));
+      } else if (gql?.item_keys?.length) {
+        const extLink = gql.item?.externalLink;
+        lines.push(extLink
+          ? warn(`getgems externalLink: "${extLink.substring(0,80)}" — UUID не найден`)
+          : warn(`getgems externalLink: пусто. Поля: [${gql.item_keys.join(", ")}]`));
       } else {
-        const keys = j.item_keys?.join(", ") || "нет";
-        lines.push(warn(`getgems externalLink: пусто. Поля item: [${keys}]`));
+        lines.push(warn(`getgems: нет данных. Нажми «🔎 Debug getgems NFT» для подробностей`));
       }
     } catch(e) {
       lines.push(warn(`getgems NFT lookup: ${e.message.substring(0,60)}`));
@@ -2297,25 +2301,56 @@ async function debugGetgemsNft() {
     const r = await fetch(`/debug-getgems-nft?addr=${encodeURIComponent(addr.trim())}`);
     const j = await r.json();
     const lines = [];
+    lines.push(`<b>Адрес:</b> ${esc(addr.trim())}`);
+    lines.push("");
+
     if (!j.ok) {
       lines.push(`<span style="color:var(--red)">Ошибка: ${esc(JSON.stringify(j))}</span>`);
     } else {
-      const extLink = j.external_link;
-      lines.push(`<b>Адрес:</b> ${esc(addr)}`);
-      lines.push(`<b>Ключи item:</b> ${esc(j.item_keys?.join(", ") || "(none)")}`);
-      lines.push(`<b>externalLink:</b> ${esc(extLink || "(пусто)")}`);
       if (j.uuids_found?.length) {
-        lines.push(`<b style="color:var(--green)">UUID найден:</b> ${esc(j.uuids_found.join(", "))}`);
+        lines.push(`<b style="color:var(--green)">✓ UUID найден: ${esc(j.uuids_found.join(", "))}</b>`);
       } else {
-        lines.push(`<span style="color:var(--yellow)">UUID не найден в ответе getgems</span>`);
+        lines.push(`<span style="color:var(--yellow)">UUID не найден ни в GraphQL ни в REST API</span>`);
       }
-      if (j.gomining_urls?.length) {
-        lines.push(`<b>GoMining URL:</b> ${esc(j.gomining_urls.join(", "))}`);
+      lines.push("");
+
+      // GraphQL result
+      const gql = j.results?.graphql;
+      if (gql) {
+        if (!gql.ok) {
+          lines.push(`<b>GraphQL:</b> <span style="color:var(--red)">HTTP ${gql.http_status || "?"} — ${esc(gql.body || gql.error || "")}</span>`);
+        } else {
+          const extLink = gql.item?.externalLink || "";
+          lines.push(`<b>GraphQL externalLink:</b> ${esc(extLink || "(пусто)")}`);
+          lines.push(`<b>GraphQL поля:</b> ${esc(gql.item_keys?.join(", ") || "(нет данных)")}`);
+          if (gql.errors?.length) lines.push(`<span style="color:var(--red)">GraphQL ошибки: ${esc(JSON.stringify(gql.errors[0]))}</span>`);
+          if (gql.uuids_found?.length) lines.push(`<span style="color:var(--green)">UUID из GraphQL: ${esc(gql.uuids_found.join(", "))}</span>`);
+        }
       }
-      if (j.errors?.length) {
-        lines.push(`<b style="color:var(--red)">GraphQL ошибки:</b> ${esc(JSON.stringify(j.errors))}`);
+      lines.push("");
+
+      // REST result
+      const rest = j.results?.rest;
+      if (rest) {
+        if (!rest.ok) {
+          lines.push(`<b>REST API:</b> <span style="color:var(--muted)">HTTP ${rest.http_status || "?"}</span>`);
+        } else {
+          const extLink2 = rest.external_link || "";
+          lines.push(`<b>REST URL:</b> ${esc(rest.url || "")}`);
+          lines.push(`<b>REST externalLink:</b> ${esc(extLink2 || "(пусто)")}`);
+          if (rest.uuids_found?.length) lines.push(`<span style="color:var(--green)">UUID из REST: ${esc(rest.uuids_found.join(", "))}</span>`);
+          if (rest.gomining_urls?.length) lines.push(`<b>GoMining URL:</b> ${esc(rest.gomining_urls.join(", "))}`);
+        }
       }
-      lines.push(`<details><summary>Полный ответ</summary><pre style="white-space:pre-wrap;word-break:break-all;font-size:10px;">${esc(JSON.stringify(j.raw, null, 2))}</pre></details>`);
+      // Show all REST attempts if main failed
+      for (const [k, v] of Object.entries(j.results || {})) {
+        if (k !== "graphql" && k !== "rest" && v && !v.ok) {
+          lines.push(`<span style="color:var(--muted)">${esc(k)}: HTTP ${v.http_status || v.error || "?"}</span>`);
+        }
+      }
+
+      lines.push("");
+      lines.push(`<details><summary>Полный ответ (JSON)</summary><pre style="white-space:pre-wrap;word-break:break-all;font-size:10px;">${esc(JSON.stringify(j, null, 2))}</pre></details>`);
     }
     el.innerHTML = lines.join("<br>");
   } catch(e) {
