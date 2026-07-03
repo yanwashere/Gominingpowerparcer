@@ -436,7 +436,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if miner:
                     self.send_json(200, {"ok": True, "found": True, "data": miner})
                     return
-            self.send_json(200, {"ok": True, "found": False, "num": num})
+                # Also try exact name match (e.g. "MINEBOX 349973" → "349973")
+                for key, val in _gm_market_cache.get("by_name_num", {}).items():
+                    if num in key:
+                        self.send_json(200, {"ok": True, "found": True, "data": val})
+                        return
+            self.send_json(200, {"ok": True, "found": False, "num": num,
+                                 "cached": _gm_market_cache is not None,
+                                 "cacheSize": len((_gm_market_cache or {}).get("by_name_num", {}))})
             return
 
         # ── /gm-by-token-id — look up any miner by tokenId ───────────────────────
@@ -512,81 +519,72 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return {"ok": True, "endpoint": endpoint, "data": data}
         return {"ok": False, "tried": len(candidates)}
 
-    def _scan_gm_marketplace(self, max_pages: int = 20, per_page: int = 100) -> dict | None:
+    def _scan_gm_marketplace(self, max_pages: int = 30, per_page: int = 200) -> dict | None:
         """
-        Scan GoMining marketplace listing API.
-        Returns {"by_name_num": {"213775": miner, ...}, "count": N} or None if not reachable.
-        Probes several candidate endpoint patterns.
+        Scan GoMining marketplace via /api/nft/marketplace-index.
+        Returns {"by_name_num": {"4806": miner, ...}, "by_ext_id": {uuid: miner}, "count": N}
         """
         import re as _re
-        # Candidate paginated endpoints for GoMining marketplace listings
-        endpoints = [
-            ("/api/marketplace/nft",        {"page": 1, "limit": per_page, "status": "available"}),
-            ("/api/marketplace/nft",        {"page": 1, "limit": per_page, "available": "true"}),
-            ("/api/nft/marketplace",         {"page": 1, "limit": per_page}),
-            ("/api/nft/get-marketplace",     {"page": 1, "limit": per_page}),
-            ("/api/marketplace/listings",    {"page": 1, "limit": per_page}),
-            ("/api/nft",                     {"page": 1, "limit": per_page, "status": "available", "marketplace": "gmt-secondary"}),
-            ("/api/marketplace",             {"page": 1, "limit": per_page, "status": "available"}),
-        ]
+        ENDPOINT = "/api/nft/marketplace-index"
 
         by_name_num: dict = {}
-        working_endpoint: str | None = None
-        working_params: dict = {}
+        by_ext_id:   dict = {}
 
-        # Find a working endpoint by trying page 1
-        for ep, params in endpoints:
-            data = self._gm_request(ep, params)
+        for page in range(1, max_pages + 1):
+            params = {"page": page, "perPage": per_page, "limit": per_page}
+            data = self._gm_request(ENDPOINT, params)
             if data is None:
-                continue
-            # Extract items list from various response shapes
-            items = (
-                data if isinstance(data, list) else
-                data.get("data") or data.get("items") or data.get("nfts") or
-                data.get("listings") or data.get("results") or []
-            )
-            if not isinstance(items, list) or len(items) == 0:
-                continue
-            # Validate first item looks like a miner (has externalUrlId or power)
-            first = items[0] if items else {}
-            if not (first.get("externalUrlId") or first.get("power") or first.get("name")):
-                continue
-            print(f"[marketplace] found working endpoint: {ep} → {len(items)} items on page 1")
-            working_endpoint = ep
-            working_params = {k: v for k, v in params.items() if k != "page"}
-            # Index page 1
-            for m in items:
-                self._index_market_miner(m, by_name_num, _re)
-            # Paginate further
-            total_pages = data.get("totalPages") or data.get("pages") or max_pages if isinstance(data, dict) else max_pages
-            for pg in range(2, min(int(total_pages) + 1, max_pages + 1)):
-                page_data = self._gm_request(working_endpoint, {**working_params, "page": pg})
-                if not page_data:
+                if page == 1:
+                    # Try without params as fallback
+                    data = self._gm_request(ENDPOINT)
+                if data is None:
                     break
-                page_items = (
-                    page_data if isinstance(page_data, list) else
-                    page_data.get("data") or page_data.get("items") or
-                    page_data.get("nfts") or page_data.get("results") or []
-                )
-                if not page_items:
-                    break
-                for m in page_items:
-                    self._index_market_miner(m, by_name_num, _re)
-            break
 
-        if not working_endpoint and not by_name_num:
+            # Response shape: {"data": {"array": [...], "total": N, ...}}
+            inner = data.get("data") if isinstance(data, dict) else {}
+            items = (
+                inner.get("array") if isinstance(inner, dict) else None
+            ) or (
+                data.get("array") or []
+                if isinstance(data, dict) else data if isinstance(data, list) else []
+            )
+
+            if not items:
+                break
+
+            for m in items:
+                self._index_market_miner(m, by_name_num, by_ext_id, _re)
+
+            print(f"[marketplace] page {page}: {len(items)} items (total indexed: {len(by_name_num)})")
+
+            # Stop if last page
+            total = inner.get("total") or inner.get("count") if isinstance(inner, dict) else None
+            if total and len(by_name_num) >= total:
+                break
+            if len(items) < per_page:
+                break
+
+        if not by_name_num and not by_ext_id:
             return None
 
-        print(f"[marketplace] indexed {len(by_name_num)} unique miners")
-        return {"by_name_num": by_name_num, "count": len(by_name_num), "endpoint": working_endpoint}
+        print(f"[marketplace] done — {len(by_name_num)} miners indexed")
+        return {
+            "by_name_num": by_name_num,
+            "by_ext_id":   by_ext_id,
+            "count":       len(by_name_num),
+            "endpoint":    ENDPOINT,
+        }
 
     @staticmethod
-    def _index_market_miner(m: dict, index: dict, re_mod) -> None:
-        """Extract name-number from a marketplace miner entry and add to index."""
+    def _index_market_miner(m: dict, name_idx: dict, ext_idx: dict, re_mod) -> None:
+        """Index a marketplace miner entry by name-number and by externalUrlId."""
         name = m.get("name", "")
-        match = re_mod.search(r"\d{4,7}", name)
+        match = re_mod.search(r"\d{3,7}", name)
         if match:
-            index[match.group(0)] = m
+            name_idx[match.group(0)] = m
+        ext = m.get("externalUrlId")
+        if ext:
+            ext_idx[str(ext)] = m
 
     def _scrape_getgems_uuid(self, nft_addr: str) -> str | None:
         """Fetch the getgems NFT page and extract GoMining externalUrlId (UUID)."""
