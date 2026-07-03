@@ -302,6 +302,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(content)
             return
 
+        # ── /tonapi-debug — return raw tonapi NFT response for debugging ─────────
+        if path == "/tonapi-debug":
+            addr = qs.get("addr", [""])[0].strip()
+            if not addr:
+                self.send_json(400, {"error": "addr required"})
+                return
+            try:
+                req = urllib.request.Request(f"https://tonapi.io/v2/nfts/{urllib.parse.quote(addr)}")
+                req.add_header("Accept", "application/json")
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    body = resp.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as e:
+                self.send_json(500, {"error": str(e)})
+            return
+
         # ── /getgems-uuid — scrape getgems NFT page to find GoMining UUID ───────
         if path == "/getgems-uuid":
             nft_addr = qs.get("addr", [""])[0].strip()

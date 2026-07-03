@@ -1089,7 +1089,7 @@ async function fetchMiner(index, collectionName) {
 // Calls GoMining API → then enriches with tonapi data if possible.
 async function fetchMinerByUuid(uuid) {
   const s = getSettings();
-  if (!s.token) throw new Error("Токен GoMining не задан — добавьте токен в Настройках");
+  if (!IS_LOCAL && !s.token) throw new Error("Токен GoMining не задан — добавьте токен в Настройках");
 
   const raw = await gmGet(`/api/nft/get-by-external-url-id`, { externalUrlId: uuid });
   if (!raw) throw new Error("GoMining API не вернул данных для этого UUID");
