@@ -890,7 +890,7 @@ const GQL_VARIANTS_BY_INDEX = [
   // Variant A: alphaNftItemByIndex (older API)
   `query Q($collectionAddress: String!, $index: String!) {
     alphaNftItemByIndex(collectionAddress: $collectionAddress, itemIndex: $index) {
-      address index name
+      address index name externalLink
       attributes { key value }
       sale { ... on NftSaleFix { fullPrice } }
     }
@@ -898,7 +898,7 @@ const GQL_VARIANTS_BY_INDEX = [
   // Variant B: nftItemByIndex (alternative name)
   `query Q($collectionAddress: String!, $index: String!) {
     nftItemByIndex(collectionAddress: $collectionAddress, index: $index) {
-      address index name
+      address index name externalLink
       attributes { key value }
       sale { ... on NftSaleFix { fullPrice } }
     }
@@ -911,13 +911,39 @@ const GQL_VARIANTS_BY_INDEX = [
       filters: { saleType: ALL }
     ) {
       items { ... on NftItem {
-        address index name
+        address index name externalLink
         attributes { key value }
         sale { ... on NftSaleFix { fullPrice } }
       }}
     }
   }`,
 ];
+
+// Query to get a single NFT by its address from getgems (for externalLink = GoMining URL)
+const GQL_NFT_BY_ADDRESS = `
+query Q($address: String!) {
+  alphaNftItem(address: $address) {
+    address index name externalLink
+    attributes { key value }
+    sale { ... on NftSaleFix { fullPrice } }
+  }
+}`;
+
+async function gqlGetByAddress(nftAddress) {
+  const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+  try {
+    const data = await gqlPost(GQL_NFT_BY_ADDRESS, { address: nftAddress });
+    const item = data?.alphaNftItem;
+    if (!item) return null;
+    const extLink = item.externalLink || "";
+    const uuidMatch = extLink.match(UUID_RE);
+    console.log("[getgems] externalLink for", nftAddress, "→", extLink || "(empty)");
+    return { ...item, externalUrlId: uuidMatch ? uuidMatch[0] : null };
+  } catch(e) {
+    console.log("[getgems] gqlGetByAddress failed:", e.message);
+    return null;
+  }
+}
 
 async function gqlGetByIndex(collectionAddress, index) {
   const vars = { collectionAddress, index: String(index) };
@@ -1121,6 +1147,12 @@ async function fetchMiner(index, collectionName) {
           const attrs = parseAttrs(gg.attributes);
           miner.baselinePower = parseBaselinePower(attrs);
           miner.baselineEff   = parseEfficiency(attrs);
+        }
+        // externalLink from getgems may contain the GoMining UUID
+        if (!miner.externalUrlId && gg.externalLink) {
+          const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+          const m = gg.externalLink.match(UUID_RE);
+          if (m) { miner.externalUrlId = m[0]; console.log("[getgems] UUID from externalLink:", m[0]); }
         }
         miner.dataSource.push("getgems ✓");
       }
@@ -1361,15 +1393,31 @@ async function fetchMinerByAddress(tonAddr) {
     } catch(e2) { /* optional */ }
   }
 
+  if (!uuid && tonAddr) {
+    // Strategy 2: ask getgems GraphQL for externalLink on this NFT address
+    // For GoMining miners getgems stores "https://app.gomining.com/nft/view/{uuid}"
+    try {
+      const gg = await gqlGetByAddress(tonAddr);
+      if (gg?.externalUrlId) {
+        uuid = gg.externalUrlId;
+        miner.externalUrlId = uuid;
+        if (!miner.priceTon && gg.sale?.fullPrice)
+          miner.priceTon = parseInt(gg.sale.fullPrice) / NANOTON;
+        miner.dataSource.push("uuid: getgems ✓");
+        console.log("[getgems] got UUID from externalLink:", uuid);
+      }
+    } catch(e2) { /* optional */ }
+  }
+
   if (!uuid && IS_LOCAL && tonAddr) {
-    // Strategy 2: scrape getgems HTML page for UUID (React SPA — rarely works)
+    // Strategy 3: scrape getgems HTML page for UUID (React SPA — rarely works)
     try {
       const r = await fetch(`/getgems-uuid?addr=${encodeURIComponent(tonAddr)}`);
       const j = await r.json();
       if (j.ok && j.uuid) {
         uuid = j.uuid;
         miner.externalUrlId = uuid;
-        miner.dataSource.push("uuid: getgems page ✓");
+        miner.dataSource.push("uuid: getgems html ✓");
       }
     } catch(e2) { /* optional */ }
   }
