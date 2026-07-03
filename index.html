@@ -298,6 +298,13 @@
 
 <div class="container">
 
+  <!-- Local server banner (only shown when running on localhost) -->
+  <div id="localBanner" style="display:none; background:var(--green); color:#fff; padding:8px 14px; border-radius:8px; margin-bottom:12px; font-size:13px; display:flex; align-items:center; gap:10px;">
+    <span>⚡ Локальный режим</span>
+    <span id="localTokenStatus" style="opacity:.85;">токен: проверяем…</span>
+    <button onclick="refreshLocalToken()" style="margin-left:auto; background:rgba(255,255,255,.25); border:none; color:#fff; padding:3px 10px; border-radius:5px; cursor:pointer; font-size:12px;">↺ Обновить токен</button>
+  </div>
+
   <!-- Settings Panel -->
   <div class="settings-panel collapsed" id="settingsPanel">
     <div class="settings-header" onclick="toggleSettings()">
@@ -306,7 +313,7 @@
     </div>
     <div class="settings-body">
       <div class="settings-row">
-        <div class="field">
+        <div class="field" id="tokenField">
           <label>GoMining JWT Token <span id="tokenStatus"></span></label>
           <input type="password" id="tokenInput" placeholder="eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9..." autocomplete="off">
           <div class="hint">
@@ -322,12 +329,13 @@
         </div>
       </div>
 
-      <div class="field">
+      <div class="field" id="corsProxyField">
         <label>CORS Proxy (если API блокирует браузерные запросы)</label>
         <input type="text" id="corsProxyInput" placeholder="https://corsproxy.io/? (оставьте пустым для прямых запросов)">
         <div class="hint">
           Если GoMining API возвращает ошибку CORS — вставьте адрес прокси.
           Пример: <code>https://corsproxy.io/?</code> (бесплатный, без гарантий).
+          <span id="localProxyNote" style="display:none;">В локальном режиме GoMining API проксируется сервером автоматически — CORS прокси не нужен.</span>
         </div>
       </div>
 
@@ -335,6 +343,7 @@
         <button class="btn btn-primary btn-sm" onclick="saveSettings()">💾 Сохранить</button>
         <button class="btn btn-secondary btn-sm" onclick="clearSettings()">🗑️ Очистить токены</button>
         <button class="btn btn-secondary btn-sm" onclick="testApis()">🔬 Тест API</button>
+        <span id="localPasteHint" style="display:none; font-size:12px; color:var(--muted);">Или вставьте токен выше и нажмите Сохранить — он отправится на локальный сервер.</span>
       </div>
       <div id="apiTestResult" class="hidden" style="margin-top:8px; font-size:12px; font-family:monospace; background:var(--bg); padding:10px; border-radius:6px; border:1px solid var(--border); line-height:1.8;"></div>
     </div>
@@ -444,6 +453,11 @@ const TONAPI_BASE   = "https://tonapi.io/v2";
 const GOMINING_API  = "https://api.gomining.com";
 const NANOTON       = 1_000_000_000;
 
+// When served from our local Python server, proxy GoMining calls through it
+// (no CORS, token injected server-side header, auto-extracted from Safari)
+const IS_LOCAL = location.hostname === "localhost" || location.hostname === "127.0.0.1";
+const LOCAL_PROXY = IS_LOCAL ? `http://${location.host}/proxy` : null;
+
 // ──────────────────────────────────────────────────────────────────────────────
 // SETTINGS
 // ──────────────────────────────────────────────────────────────────────────────
@@ -467,6 +481,11 @@ function saveSettings() {
   if (corsProxy) localStorage.setItem("gm_cors_proxy", corsProxy);
   else           localStorage.removeItem("gm_cors_proxy");
   updateTokenStatus();
+  // In local mode, also forward pasted token to the server so the proxy can use it
+  if (IS_LOCAL && token) {
+    fetch(`/set-token?t=${encodeURIComponent(token)}`).catch(() => {});
+    checkLocalToken().catch(() => {});
+  }
   showToast("✅ Настройки сохранены");
 }
 
@@ -685,6 +704,29 @@ async function tonapiGetByIndex(colAddr, index) {
 }
 
 async function gmGet(path, params = {}) {
+  // Local server mode: proxy handles auth header + no CORS
+  if (IS_LOCAL) {
+    const url = new URL(`${LOCAL_PROXY}${path}`);
+    Object.entries(params).forEach(([k,v]) => url.searchParams.set(k, v));
+    try {
+      const resp = await fetch(url.toString(), { headers: { Accept: "application/json" } });
+      if (resp.status === 401) {
+        const j = await resp.json().catch(() => ({}));
+        if (j.error === "no_token")
+          throw new Error("401: Токен GoMining не найден — вставьте его в Настройки или перезапустите сервер");
+        throw new Error("401: Токен GoMining истёк — открой GoMining в браузере и обнови токен");
+      }
+      if (resp.status === 403)
+        throw new Error("401: Токен GoMining истёк — открой GoMining в браузере и обнови токен");
+      if (!resp.ok) return null;
+      return resp.json();
+    } catch(e) {
+      if (e.message.includes("401")) throw e;
+      return null;
+    }
+  }
+
+  // GitHub Pages / browser mode: needs token + optional CORS proxy
   const s = getSettings();
   if (!s.token) return null;
   const url = new URL(`${GOMINING_API}${path}`);
@@ -712,7 +754,7 @@ async function gmGet(path, params = {}) {
 // GoMining response includes: power, externalUrlId, NFT address, ROI, etc.
 async function gmFetchMiner(tokenId, externalUrlId) {
   const s = getSettings();
-  if (!s.token) return { error: "token_missing" };
+  if (!IS_LOCAL && !s.token) return { error: "token_missing" };
 
   // Primary: /api/nft/get-by-token-id — direct lookup by tokenId (same ID shown on getgems)
   if (tokenId) {
@@ -1809,25 +1851,45 @@ async function testApis() {
   }
 
   // Test 4: GoMining API
-  const token = getSettings().token;
-  if (token) {
+  if (IS_LOCAL) {
+    // Local mode: proxy handles token
     try {
-      const testUrl = `${GOMINING_API}/api/nft/get-by-external-url-id?externalUrlId=00000000-0000-0000-0000-000000000000`;
-      const url = proxyUrl(testUrl);
-      const r = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } });
-      if (r.status === 401 || r.status === 403)
-        lines.push(err("GoMining: токен истёк или недействителен — обнови токен (он живёт ~1 час)"));
-      else if (r.status === 404 || r.status === 400) lines.push(ok("GoMining API доступен ✓ (токен действителен)"));
-      else if (r.ok)             lines.push(ok(`GoMining API доступен ✓ (${r.status})`));
-      else                       lines.push(warn(`GoMining: HTTP ${r.status}`));
+      const r = await fetch("/proxy/api/nft/get-by-external-url-id?externalUrlId=00000000-0000-0000-0000-000000000000",
+        { headers: { Accept: "application/json" } });
+      if (r.status === 401) {
+        const j = await r.json().catch(() => ({}));
+        lines.push(j.error === "no_token"
+          ? err("GoMining: токен не найден на сервере — вставьте его в Настройки")
+          : err("GoMining: токен истёк — открой GoMining в браузере, нажми «Обновить токен»"));
+      } else if (r.status === 404 || r.status === 400 || r.ok) {
+        lines.push(ok("GoMining API доступен через локальный прокси ✓"));
+      } else {
+        lines.push(warn(`GoMining: HTTP ${r.status}`));
+      }
     } catch(e) {
-      const isNetwork = ["Failed to fetch","Load failed"].some(s => e.message.includes(s));
-      lines.push(isNetwork
-        ? err("GoMining API — CORS блокировка. Укажи CORS прокси (corsproxy.io/?)")
-        : err(`GoMining: ${e.message.substring(0,60)}`));
+      lines.push(err(`GoMining прокси: ${e.message.substring(0,60)}`));
     }
   } else {
-    lines.push(warn("GoMining: токен не введён — реальная мощность недоступна"));
+    const token = getSettings().token;
+    if (token) {
+      try {
+        const testUrl = `${GOMINING_API}/api/nft/get-by-external-url-id?externalUrlId=00000000-0000-0000-0000-000000000000`;
+        const url = proxyUrl(testUrl);
+        const r = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } });
+        if (r.status === 401 || r.status === 403)
+          lines.push(err("GoMining: токен истёк или недействителен — обнови токен (он живёт ~1 час)"));
+        else if (r.status === 404 || r.status === 400) lines.push(ok("GoMining API доступен ✓ (токен действителен)"));
+        else if (r.ok)             lines.push(ok(`GoMining API доступен ✓ (${r.status})`));
+        else                       lines.push(warn(`GoMining: HTTP ${r.status}`));
+      } catch(e) {
+        const isNetwork = ["Failed to fetch","Load failed"].some(s => e.message.includes(s));
+        lines.push(isNetwork
+          ? err("GoMining API — CORS блокировка. Укажи CORS прокси (corsproxy.io/?)")
+          : err(`GoMining: ${e.message.substring(0,60)}`));
+      }
+    } else {
+      lines.push(warn("GoMining: токен не введён — реальная мощность недоступна"));
+    }
   }
 
   el.innerHTML = lines.join("<br>");
@@ -1849,7 +1911,66 @@ document.addEventListener("keydown", e => {
 // INIT
 // ──────────────────────────────────────────────────────────────────────────────
 
+// ── Local server mode ─────────────────────────────────────────────────────────
+
+async function initLocalMode() {
+  if (!IS_LOCAL) return;
+
+  // Show local banner, hide CORS proxy field hint
+  document.getElementById("localBanner").style.display = "flex";
+  document.getElementById("localProxyNote").style.display = "inline";
+  document.getElementById("localPasteHint").style.display = "inline";
+
+  await checkLocalToken();
+}
+
+async function checkLocalToken() {
+  const el = document.getElementById("localTokenStatus");
+  try {
+    const r = await fetch("/token");
+    const j = await r.json();
+    if (j.ok && j.token) {
+      const now = Math.floor(Date.now() / 1000);
+      const remaining = j.exp ? j.exp - now : 0;
+      if (remaining < 0) {
+        el.textContent = "токен истёк — открой GoMining и обнови";
+        el.style.color = "#ffcccc";
+      } else {
+        const mins = Math.floor(remaining / 60);
+        el.textContent = `токен активен (~${mins} мин. осталось) ✓`;
+        el.style.color = "#fff";
+        // also push to settings so saveSettings() can forward it if user wants
+        document.getElementById("tokenInput").value = j.token;
+        localStorage.setItem("gm_token", j.token);
+      }
+    } else {
+      el.textContent = "токен не найден — вставьте его в Настройки";
+      el.style.color = "#ffcccc";
+    }
+  } catch(e) {
+    el.textContent = "сервер недоступен?";
+  }
+}
+
+async function refreshLocalToken() {
+  const el = document.getElementById("localTokenStatus");
+  el.textContent = "ищем токен…";
+  try {
+    const r = await fetch("/refresh-token");
+    const j = await r.json();
+    if (j.ok) {
+      await checkLocalToken();
+    } else {
+      el.textContent = "не нашли — открой GoMining в браузере и попробуй снова";
+      el.style.color = "#ffcccc";
+    }
+  } catch(e) {
+    el.textContent = "ошибка запроса к серверу";
+  }
+}
+
 loadSettingsUI();
+initLocalMode();
 </script>
 </body>
 </html>
