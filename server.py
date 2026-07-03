@@ -392,46 +392,59 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(200, {"ok": True, "cached": False, "data": _my_miners_cache})
             return
 
-        # ── /gm-market-debug — raw response from marketplace-index (for debugging) ──
+        # ── /gm-market-debug — probe many marketplace endpoint variants ────────────
         if path == "/gm-market-debug":
             if not Handler.token:
                 self.send_json(401, {"error": "no_token"})
                 return
-            raw_params = qs.get("params", [""])[0]  # e.g. ?params=page=1&perPage=50
-            extra = {}
-            if raw_params:
-                for kv in raw_params.split("&"):
-                    if "=" in kv:
-                        k, v = kv.split("=", 1)
-                        extra[k] = v
-            url = GOMINING_API + "/api/nft/marketplace-index"
-            if extra:
-                url += "?" + urllib.parse.urlencode(extra)
-            req = urllib.request.Request(url)
-            req.add_header("Authorization", f"Bearer {Handler.token}")
-            req.add_header("Accept", "application/json")
-            req.add_header("Origin", "https://app.gomining.com")
-            req.add_header("Referer", "https://app.gomining.com/")
-            try:
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    body = resp.read()
-                    parsed = json.loads(body)
-                    # Return summary so response isn't huge
-                    inner = parsed.get("data", {})
-                    arr = inner.get("array", []) if isinstance(inner, dict) else []
-                    self.send_json(200, {
-                        "status": resp.status,
-                        "top_keys": list(parsed.keys()) if isinstance(parsed, dict) else "list",
-                        "data_keys": list(inner.keys()) if isinstance(inner, dict) else str(type(inner)),
-                        "array_len": len(arr),
-                        "first_item": arr[0] if arr else None,
-                        "url_called": url,
-                    })
-            except urllib.error.HTTPError as e:
-                body = e.read().decode("utf-8", errors="replace")
-                self.send_json(e.code, {"http_error": e.code, "body": body[:500], "url": url})
-            except Exception as e:
-                self.send_json(500, {"error": str(e), "url": url})
+            candidates = [
+                ("GET",  "/api/nft/marketplace-index",       {}),
+                ("GET",  "/api/nft/marketplace/index",       {}),
+                ("GET",  "/api/marketplace/index",           {}),
+                ("GET",  "/api/marketplace/nft",             {"status": "available", "page": 1, "perPage": 20}),
+                ("GET",  "/api/marketplace/nft",             {"page": 1, "limit": 20}),
+                ("GET",  "/api/nft/marketplace",             {"page": 1, "limit": 20}),
+                ("GET",  "/api/nft/get-marketplace",         {}),
+                ("POST", "/api/nft/marketplace-index",       {}),
+                ("GET",  "/api/nft/marketplace-index",       {"page": 1, "perPage": 20}),
+                ("GET",  "/api/v1/marketplace/nft",          {"page": 1, "limit": 20}),
+                ("GET",  "/api/nft",                         {"status": "available", "marketplace": "gmt-secondary", "page": 1}),
+            ]
+            results = []
+            for method, ep, params in candidates:
+                url = GOMINING_API + ep
+                if method == "GET" and params:
+                    url += "?" + urllib.parse.urlencode(params)
+                req = urllib.request.Request(url, method=method)
+                if method == "POST":
+                    req.data = json.dumps(params).encode()
+                    req.add_header("Content-Type", "application/json")
+                req.add_header("Authorization", f"Bearer {Handler.token}")
+                req.add_header("Accept", "application/json")
+                req.add_header("Origin", "https://app.gomining.com")
+                req.add_header("Referer", "https://app.gomining.com/")
+                try:
+                    with urllib.request.urlopen(req, timeout=8) as resp:
+                        body = resp.read()
+                        parsed = json.loads(body)
+                        inner = parsed.get("data", {}) if isinstance(parsed, dict) else {}
+                        arr_len = 0
+                        if isinstance(inner, dict):
+                            arr = inner.get("array") or inner.get("items") or inner.get("nfts") or []
+                            arr_len = len(arr) if isinstance(arr, list) else 0
+                        elif isinstance(parsed, list):
+                            arr_len = len(parsed)
+                        results.append({
+                            "method": method, "url": url, "status": 200,
+                            "top_keys": list(parsed.keys()) if isinstance(parsed, dict) else f"list[{arr_len}]",
+                            "arr_len": arr_len, "hit": arr_len > 0,
+                        })
+                except urllib.error.HTTPError as e:
+                    results.append({"method": method, "url": url, "status": e.code, "hit": False})
+                except Exception as ex:
+                    results.append({"method": method, "url": url, "error": str(ex)[:80], "hit": False})
+            hits = [r for r in results if r.get("hit")]
+            self.send_json(200, {"hits": hits, "all": results})
             return
 
         # ── /gm-market-scan — scan GoMining marketplace, cache name→miner ──────────
