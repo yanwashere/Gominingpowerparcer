@@ -695,6 +695,7 @@ function parseTonapiNft(item) {
 
   return {
     address:       rawAddrToEQ(item.address) || item.address || null,
+    rawAddress:    item.address || null,   // keep 0:hex format for GoMining API
     index:         item.index ?? null,
     name:          meta.name || null,
     attributes:    attrs,
@@ -765,27 +766,33 @@ async function gmGet(path, params = {}) {
 
 // Fetch real miner data from GoMining API.
 // GoMining response includes: power, externalUrlId, NFT address, ROI, etc.
-async function gmFetchMiner(tokenId, externalUrlId) {
+async function gmFetchMiner(tokenId, externalUrlId, rawAddress) {
   const s = getSettings();
   if (!IS_LOCAL && !s.token) return { error: "token_missing" };
 
-  // Primary: /api/nft/get-by-token-id — direct lookup by tokenId (same ID shown on getgems)
+  // 1. By UUID — most reliable, confirmed working
+  if (externalUrlId) {
+    const raw = await gmGet(`/api/nft/get-by-external-url-id`, { externalUrlId });
+    if (raw) { console.log("[GoMining] found by UUID"); return parseGmData(raw); }
+  }
+
+  // 2. By tokenId (GoMining internal ID = number in name "MINEBOX 349973")
   if (tokenId) {
     let raw = await gmGet(`/api/nft/get-by-token-id`, { tokenId });
     if (raw) { console.log("[GoMining] found by tokenId:", tokenId); return parseGmData(raw); }
-
-    // Also try path-based variant
     raw = await gmGet(`/api/v1/nfts/${tokenId}`);
     if (raw) return parseGmData(raw);
   }
 
-  // Fallback: /api/nft/get-by-external-url-id — if we already have the UUID
-  if (externalUrlId) {
-    const raw = await gmGet(`/api/nft/get-by-external-url-id`, { externalUrlId });
-    if (raw) return parseGmData(raw);
+  // 3. By blockchain address (0:hex format from TON)
+  if (rawAddress) {
+    for (const param of ["address", "nftAddress", "blockchainAddress", "tonAddress"]) {
+      const raw = await gmGet(`/api/nft/get-by-nft-address`, { [param]: rawAddress });
+      if (raw) { console.log("[GoMining] found by rawAddress via", param); return parseGmData(raw); }
+    }
   }
 
-  console.log("[GoMining] all endpoints returned null. tokenId=", tokenId, "uuid=", externalUrlId);
+  console.log("[GoMining] all endpoints null. tokenId=", tokenId, "uuid=", externalUrlId, "addr=", rawAddress);
   return { error: "not_found", externalUrlId };
 }
 
@@ -1176,9 +1183,9 @@ async function fetchMinerByAddress(tonAddr) {
     } catch(e2) { /* optional */ }
   }
 
-  // GoMining API
+  // GoMining API — try UUID first, then tokenId, then raw address
   try {
-    const gm = await gmFetchMiner(miner.index, uuid);
+    const gm = await gmFetchMiner(miner.index, uuid, ton.rawAddress);
     if (gm && !gm.error) {
       miner.realPower  = gm.power;
       miner.realEff    = gm.efficiency;
