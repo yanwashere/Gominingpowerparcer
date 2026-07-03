@@ -675,15 +675,41 @@ function parseTonapiNft(item) {
     }
   }
 
-  // Extract GoMining externalUrlId — search all possible metadata locations
+  // Extract GoMining externalUrlId — search ALL possible locations in tonapi response
   const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
   let externalUrlId = null;
-  const extUrl = meta.external_url || meta.externalUrl || meta.url || item.external_url || "";
+
+  // 1. metadata.external_url / metadata.url (standard NFT field)
+  const extUrl = meta.external_url || meta.externalUrl || meta.url || "";
   const uuidMatch = extUrl.match(UUID_RE);
-  if (uuidMatch) {
-    externalUrlId = uuidMatch[0];
-  } else {
-    // Also check attributes in case GoMining stores UUID there
+  if (uuidMatch) externalUrlId = uuidMatch[0];
+
+  // 2. Top-level item fields tonapi might put the URL in
+  if (!externalUrlId) {
+    for (const field of ["external_url", "externalUrl", "uri", "content_uri", "url"]) {
+      const v = String(item[field] || "");
+      const m = v.match(UUID_RE);
+      if (m) { externalUrlId = m[0]; break; }
+    }
+  }
+
+  // 3. individual_content — tonapi sometimes puts raw NFT content here
+  if (!externalUrlId && item.individual_content) {
+    const ic = item.individual_content;
+    const icStr = typeof ic === "string" ? ic : JSON.stringify(ic);
+    const m = icStr.match(UUID_RE);
+    if (m) externalUrlId = m[0];
+  }
+
+  // 4. Scan ALL string values in metadata (in case field name varies)
+  if (!externalUrlId) {
+    const allValues = JSON.stringify(meta);
+    const m = allValues.match(UUID_RE);
+    if (m) externalUrlId = m[0];
+  }
+
+  // 5. Attribute values
+  if (!externalUrlId) {
     for (const a of meta.attributes || []) {
       const v = String(a.value || "");
       const m = v.match(UUID_RE);
@@ -691,7 +717,7 @@ function parseTonapiNft(item) {
     }
   }
 
-  console.log("[tonapi] metadata keys:", Object.keys(meta), "| external_url:", extUrl || "(none)", "| externalUrlId:", externalUrlId);
+  console.log("[tonapi] metadata keys:", Object.keys(meta), "| extUrl:", extUrl || "(none)", "| externalUrlId:", externalUrlId, "| item keys:", Object.keys(item));
 
   return {
     address:       rawAddrToEQ(item.address) || item.address || null,
