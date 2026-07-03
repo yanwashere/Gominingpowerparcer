@@ -347,6 +347,7 @@
         <button class="btn btn-primary btn-sm" onclick="saveSettings()">💾 Сохранить</button>
         <button class="btn btn-secondary btn-sm" onclick="clearSettings()">🗑️ Очистить токены</button>
         <button class="btn btn-secondary btn-sm" onclick="testApis()">🔬 Тест API</button>
+        <button class="btn btn-secondary btn-sm" id="btnDebugGG" onclick="debugGetgemsNft()" style="display:none;">🔎 Debug getgems NFT</button>
         <span id="localPasteHint" style="display:none; font-size:12px; color:var(--muted);">Или вставьте токен выше и нажмите Сохранить — он отправится на локальный сервер.</span>
       </div>
       <div id="apiTestResult" class="hidden" style="margin-top:8px; font-size:12px; font-family:monospace; background:var(--bg); padding:10px; border-radius:6px; border:1px solid var(--border); line-height:1.8;"></div>
@@ -918,11 +919,12 @@ const GQL_VARIANTS_BY_INDEX = [
   }`,
 ];
 
-// Query to get a single NFT by its address from getgems (for externalLink = GoMining URL)
+// Query to get a single NFT by its address from getgems (for externalLink = GoMining URL).
+// Request ALL plausible external-URL field names — getgems schema may use any of these.
 const GQL_NFT_BY_ADDRESS = `
 query Q($address: String!) {
   alphaNftItem(address: $address) {
-    address index name externalLink
+    address index name description externalLink
     attributes { key value }
     sale { ... on NftSaleFix { fullPrice } }
   }
@@ -933,11 +935,28 @@ async function gqlGetByAddress(nftAddress) {
   try {
     const data = await gqlPost(GQL_NFT_BY_ADDRESS, { address: nftAddress });
     const item = data?.alphaNftItem;
-    if (!item) return null;
-    const extLink = item.externalLink || "";
-    const uuidMatch = extLink.match(UUID_RE);
-    console.log("[getgems] externalLink for", nftAddress, "→", extLink || "(empty)");
-    return { ...item, externalUrlId: uuidMatch ? uuidMatch[0] : null };
+    if (!item) {
+      console.log("[getgems] alphaNftItem returned null for", nftAddress);
+      return null;
+    }
+
+    // Check every field on the item for an external URL containing a UUID
+    const allText = JSON.stringify(item);
+    const uuidMatch = allText.match(UUID_RE);
+    const extLink = item.externalLink || item.externalUrl || item.contentUrl || item.url || "";
+    console.log("[getgems] externalLink for", nftAddress, "→", extLink || "(empty)", "| item keys:", Object.keys(item));
+    if (uuidMatch) console.log("[getgems] UUID found anywhere in item:", uuidMatch[0]);
+
+    // Also check attributes for GoMining link
+    let attrUuid = null;
+    for (const a of item.attributes || []) {
+      const v = String(a.value || "");
+      const m = v.match(UUID_RE);
+      if (m) { attrUuid = m[0]; break; }
+    }
+
+    const uuid = uuidMatch ? uuidMatch[0] : attrUuid;
+    return { ...item, externalUrlId: uuid || null };
   } catch(e) {
     console.log("[getgems] gqlGetByAddress failed:", e.message);
     return null;
@@ -2204,6 +2223,29 @@ async function testApis() {
     }
   }
 
+  // Test 5: getgems externalLink lookup (local only — uses /debug-getgems-nft)
+  if (IS_LOCAL) {
+    const testNft = "EQB3XoyBDVKjr75cH7q9A2mqF9OdVfh-bn_CV-uLpDe_KhUJ";
+    try {
+      const r = await fetch(`/debug-getgems-nft?addr=${encodeURIComponent(testNft)}`);
+      const j = await r.json();
+      if (!j.ok) {
+        lines.push(warn(`getgems NFT lookup: ошибка ${j.http_status || j.error || "?"}`));
+      } else if (j.errors?.length) {
+        lines.push(warn(`getgems NFT lookup: GraphQL ошибка — ${j.errors[0]?.message?.substring(0,80)}`));
+      } else if (j.uuids_found?.length) {
+        lines.push(ok(`getgems externalLink: UUID найден → ${j.uuids_found[0]} 🎉`));
+      } else if (j.external_link) {
+        lines.push(warn(`getgems externalLink: ${j.external_link.substring(0,80)} (UUID не распознан)`));
+      } else {
+        const keys = j.item_keys?.join(", ") || "нет";
+        lines.push(warn(`getgems externalLink: пусто. Поля item: [${keys}]`));
+      }
+    } catch(e) {
+      lines.push(warn(`getgems NFT lookup: ${e.message.substring(0,60)}`));
+    }
+  }
+
   el.innerHTML = lines.join("<br>");
 }
 
@@ -2232,11 +2274,53 @@ async function initLocalMode() {
   document.getElementById("localBanner").style.display = "flex";
   document.getElementById("localProxyNote").style.display = "inline";
   document.getElementById("localPasteHint").style.display = "inline";
+  document.getElementById("btnDebugGG").style.display = "inline-flex";
 
   await checkLocalToken();
 
   // Load user's own miners cache in the background (gives us address→UUID mapping)
   loadMyMinersCacheIfNeeded().catch(() => {});
+}
+
+// Debug: query getgems GraphQL for a known GoMining miner to see what externalLink returns
+async function debugGetgemsNft() {
+  const el = document.getElementById("apiTestResult");
+  el.classList.remove("hidden");
+  el.innerHTML = "⏳ Запрашиваем getgems GraphQL...";
+
+  // Ask the user which address to test (default = the miner from the last search)
+  const defaultAddr = "EQB3XoyBDVKjr75cH7q9A2mqF9OdVfh-bn_CV-uLpDe_KhUJ";
+  const addr = prompt("NFT адрес для проверки (EQ...):", defaultAddr);
+  if (!addr) { el.classList.add("hidden"); return; }
+
+  try {
+    const r = await fetch(`/debug-getgems-nft?addr=${encodeURIComponent(addr.trim())}`);
+    const j = await r.json();
+    const lines = [];
+    if (!j.ok) {
+      lines.push(`<span style="color:var(--red)">Ошибка: ${esc(JSON.stringify(j))}</span>`);
+    } else {
+      const extLink = j.external_link;
+      lines.push(`<b>Адрес:</b> ${esc(addr)}`);
+      lines.push(`<b>Ключи item:</b> ${esc(j.item_keys?.join(", ") || "(none)")}`);
+      lines.push(`<b>externalLink:</b> ${esc(extLink || "(пусто)")}`);
+      if (j.uuids_found?.length) {
+        lines.push(`<b style="color:var(--green)">UUID найден:</b> ${esc(j.uuids_found.join(", "))}`);
+      } else {
+        lines.push(`<span style="color:var(--yellow)">UUID не найден в ответе getgems</span>`);
+      }
+      if (j.gomining_urls?.length) {
+        lines.push(`<b>GoMining URL:</b> ${esc(j.gomining_urls.join(", "))}`);
+      }
+      if (j.errors?.length) {
+        lines.push(`<b style="color:var(--red)">GraphQL ошибки:</b> ${esc(JSON.stringify(j.errors))}`);
+      }
+      lines.push(`<details><summary>Полный ответ</summary><pre style="white-space:pre-wrap;word-break:break-all;font-size:10px;">${esc(JSON.stringify(j.raw, null, 2))}</pre></details>`);
+    }
+    el.innerHTML = lines.join("<br>");
+  } catch(e) {
+    el.innerHTML = `<span style="color:var(--red)">Ошибка запроса: ${esc(e.message)}</span>`;
+  }
 }
 
 async function reloadMarketScan() {
