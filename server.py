@@ -304,6 +304,44 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         self.send_json(404, {"error": "not found"})
 
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+
+        # ── /proxy-getgems — forward GraphQL to getgems (no CORS) ────────────
+        if path == "/proxy-getgems":
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            req = urllib.request.Request(
+                "https://api.getgems.io/graphql",
+                data=body,
+                method="POST",
+            )
+            req.add_header("Content-Type", "application/json")
+            req.add_header("Accept", "application/json")
+            req.add_header("Origin", "https://getgems.io")
+            req.add_header("Referer", "https://getgems.io/")
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    resp_body = resp.read()
+                    self.send_response(resp.status)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(resp_body)
+            except urllib.error.HTTPError as e:
+                resp_body = e.read()
+                self.send_response(e.code)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(resp_body)
+            except Exception as e:
+                self.send_json(502, {"error": "proxy_error", "message": str(e)})
+            return
+
+        self.send_json(404, {"error": "not found"})
+
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 

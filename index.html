@@ -571,6 +571,19 @@ function proxyUrl(url) {
 }
 
 async function gqlPost(query, variables) {
+  // Local server mode: proxy handles CORS for getgems too
+  if (IS_LOCAL) {
+    const resp = await fetch("/proxy-getgems", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, variables }),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+    const data = await resp.json();
+    if (data.errors) throw new Error(`GraphQL: ${data.errors.map(e => e.message).join("; ")}`);
+    return data.data;
+  }
+
   const proxy = getSettings().corsProxy.trim();
   // Direct first; if CORS error and proxy configured — retry via proxy
   const urlsToTry = [GETGEMS_GQL];
@@ -953,15 +966,23 @@ async function fetchMiner(index, collectionName) {
   // If no collection specified, try both starting from Release 2 (larger IDs live there)
   if (!collectionName) {
     const order = ["GoMining Digital Miners: Release 2", "GoMining Digital Miners"];
-    let lastResult = null;
+    let bestResult = null;
     for (const colName of order) {
-      const result = await fetchMiner(index, colName);
-      lastResult = result;
-      // Found a real GoMining miner: has baseline power or GoMining-like name
-      if (result.baselinePower !== null) return result;
-      if (result.name && /(mine|miner|minebox|gomining|digital)/i.test(result.name)) return result;
+      let result;
+      try { result = await fetchMiner(index, colName); }
+      catch(e) { if (e.message.includes("401")) throw e; continue; }
+
+      const isGoMiningNft =
+        result.realPower > 0 ||                  // GoMining API confirmed it
+        result.externalUrlId ||                   // has UUID → GoMining NFT
+        (result.baselinePower > 0) ||             // has blockchain power attrs
+        (result.name && /(mine|miner|minebox|gomining)/i.test(result.name)); // name matches
+
+      if (isGoMiningNft) return result;
+      // Keep the better of the two (prefer one with at least a name)
+      if (!bestResult || (result.name && result.name !== `#${index}`)) bestResult = result;
     }
-    return lastResult; // return whichever came last
+    return bestResult;
   }
 
   const colName   = collectionName;
