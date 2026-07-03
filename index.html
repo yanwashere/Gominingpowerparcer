@@ -1162,9 +1162,23 @@ async function fetchMinerByAddress(tonAddr) {
     dataSource:    ["tonapi ✓ (адрес)"],
   };
 
+  // If tonapi didn't give us UUID, try scraping getgems page (local server only)
+  let uuid = ton.externalUrlId;
+  if (!uuid && IS_LOCAL && tonAddr) {
+    try {
+      const r = await fetch(`/getgems-uuid?addr=${encodeURIComponent(tonAddr)}`);
+      const j = await r.json();
+      if (j.ok && j.uuid) {
+        uuid = j.uuid;
+        miner.externalUrlId = uuid;
+        miner.dataSource.push("uuid: getgems page ✓");
+      }
+    } catch(e2) { /* optional */ }
+  }
+
   // GoMining API
   try {
-    const gm = await gmFetchMiner(miner.index, ton.externalUrlId);
+    const gm = await gmFetchMiner(miner.index, uuid);
     if (gm && !gm.error) {
       miner.realPower  = gm.power;
       miner.realEff    = gm.efficiency;
@@ -1174,9 +1188,10 @@ async function fetchMinerByAddress(tonAddr) {
       miner.roi        = gm.roi;
       miner.incomeAgg  = gm.incomeAgg;
       if (gm.priceUsdt) miner.priceUsdt = gm.priceUsdt;
+      if (gm.externalUrlId) miner.externalUrlId = gm.externalUrlId;
       miner.dataSource.push("gomining ✓");
     } else if (gm?.error === "not_found") {
-      const hint = ton.externalUrlId ? `uuid=${ton.externalUrlId.slice(0,8)}…` : "нет uuid";
+      const hint = uuid ? `uuid=${uuid.slice(0,8)}…` : "нет uuid";
       miner.dataSource.push(`gomining: нет данных (${hint})`);
     }
   } catch(e) { if (e.message.includes("401")) throw e; }

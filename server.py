@@ -302,7 +302,51 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(content)
             return
 
+        # ── /getgems-uuid — scrape getgems NFT page to find GoMining UUID ───────
+        if path == "/getgems-uuid":
+            nft_addr = qs.get("addr", [""])[0].strip()
+            if not nft_addr:
+                self.send_json(400, {"error": "addr required"})
+                return
+            uuid = self._scrape_getgems_uuid(nft_addr)
+            if uuid:
+                self.send_json(200, {"ok": True, "uuid": uuid})
+            else:
+                self.send_json(200, {"ok": False, "uuid": None})
+            return
+
         self.send_json(404, {"error": "not found"})
+
+    def _scrape_getgems_uuid(self, nft_addr: str) -> str | None:
+        """Fetch the getgems NFT page and extract GoMining externalUrlId (UUID)."""
+        import re
+        urls_to_try = [
+            f"https://getgems.io/nft/{nft_addr}",
+            f"https://getgems.io/collection/{nft_addr}",
+        ]
+        uuid_re = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        for url in urls_to_try:
+            try:
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    html = resp.read().decode("utf-8", errors="replace")
+                    # look for gomining.com URL containing UUID
+                    m = re.search(r"gomining\.com/nft/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", html, re.I)
+                    if m:
+                        return m.group(1)
+                    # fallback: any UUID in the page near "gomining"
+                    for chunk in re.findall(r".{0,50}gomining.{0,50}", html, re.I):
+                        m2 = uuid_re.search(chunk)
+                        if m2:
+                            return m2.group(0)
+            except Exception:
+                pass
+        return None
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
