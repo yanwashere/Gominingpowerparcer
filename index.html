@@ -1571,9 +1571,19 @@ function parseSmartInput(raw) {
   // Raw UUID
   if (UUID_RE.test(s) && s.length < 50) return { type: "uuid", value: s };
 
-  // getgems URL: https://getgems.io/nft/{EQ...}/{index}
-  const ggMatch = s.match(/getgems\.io\/nft\/([A-Za-z0-9_\-]{40,})[\/](\d+)/);
-  if (ggMatch) return { type: "index", collection: ggMatch[1], value: parseInt(ggMatch[2]) };
+  // getgems URL: /collection/{collectionAddr}/{nftAddr}  ← most common format
+  const ggCol = s.match(/getgems\.io\/collection\/[A-Za-z0-9_\-]{40,}\/([EU]Q[A-Za-z0-9_\-]{46})/);
+  if (ggCol) return { type: "tonAddr", value: ggCol[1] };
+
+  // getgems URL: /collection/{collectionAddr}/{index}
+  const ggColIdx = s.match(/getgems\.io\/collection\/([A-Za-z0-9_\-]{40,})\/(\d+)/);
+  if (ggColIdx) return { type: "index", collection: ggColIdx[1], value: parseInt(ggColIdx[2]) };
+
+  // getgems URL: /nft/{nftAddr} or /nft/{collectionAddr}/{index}
+  const ggNftAddr = s.match(/getgems\.io\/nft\/([EU]Q[A-Za-z0-9_\-]{46})/);
+  if (ggNftAddr) return { type: "tonAddr", value: ggNftAddr[1] };
+  const ggNftIdx = s.match(/getgems\.io\/nft\/([A-Za-z0-9_\-]{40,})[\/](\d+)/);
+  if (ggNftIdx) return { type: "index", collection: ggNftIdx[1], value: parseInt(ggNftIdx[2]) };
 
   // TON EQ/UQ address
   if (/^[EU]Q[A-Za-z0-9_\-]{46}$/.test(s)) return { type: "tonAddr", value: s };
