@@ -795,7 +795,8 @@ function parseTonapiNft(item) {
     attributes:    attrs,
     priceTon,
     isOnSale,
-    owner:         item.owner?.address || null,
+    owner:             item.owner?.address || null,
+    collectionAddress: item.collection?.address || null,
     externalUrlId,
   };
 }
@@ -1417,6 +1418,15 @@ async function fetchMinerByAddress(tonAddr) {
         return miner;
       }
     } catch(e2) { /* optional */ }
+  }
+
+  // Strategy 1d: GoMining Whales formula — externalUrlId = 110000 + tokenId
+  // Confirmed: tokenId=3275 → externalUrlId=113275, diff=110000 (exact round number = collection offset)
+  const WHALES_COLLECTION = 'EQCrrb8MGFT18munzM6FolUThLb92iY0Gl6Sc2vMw92GASZp';
+  if (!uuid && ton.collectionAddress === WHALES_COLLECTION && ton.index != null) {
+    uuid = String(110000 + ton.index);
+    miner.externalUrlId = uuid;
+    console.log('[whales-formula] computed externalUrlId:', uuid, 'from tokenId:', ton.index);
   }
 
   if (!uuid && IS_LOCAL && ton.rawAddress) {
