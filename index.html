@@ -2320,6 +2320,18 @@ async function debugNftBlockchain() {
       lines.push(`&nbsp;&nbsp;Индекс: ${tn.index ?? "?"} | Имя: ${esc(tn.name || "?")}`);
       lines.push(`&nbsp;&nbsp;metadata поля: [${esc(tn.metadata_keys?.join(", ") || "нет")}]`);
       lines.push(`&nbsp;&nbsp;external_url: ${esc(tn.external_url || "(пусто)")}`);
+      if (tn.buttons != null) {
+        const btnStr = typeof tn.buttons === "string" ? tn.buttons : JSON.stringify(tn.buttons);
+        const UUID_RE2 = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+        const btnUuid = btnStr.match(UUID_RE2);
+        lines.push(`&nbsp;&nbsp;buttons: <code style="font-size:10px">${esc(btnStr.substring(0,300))}</code>${btnUuid ? ` <b style="color:var(--green)"> → UUID: ${esc(btnUuid[0])}</b>` : ""}`);
+      }
+      if (tn.attributes != null) {
+        const attrStr = JSON.stringify(tn.attributes);
+        const UUID_RE2 = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+        const attrUuid = attrStr.match(UUID_RE2);
+        if (attrUuid) lines.push(`&nbsp;&nbsp;<span style="color:var(--green)">UUID в attributes: ${esc(attrUuid[0])}</span>`);
+      }
       if (tn.uuids_found?.length) lines.push(`&nbsp;&nbsp;<span style="color:var(--green)">UUID в metadata: ${esc(tn.uuids_found.join(", "))}</span>`);
     }
     lines.push("");
@@ -2375,9 +2387,52 @@ async function debugNftBlockchain() {
       }
     }
 
+    // browser-side fetch button (might succeed where server→CDN gets 403)
+    const bfBtnId = "btnBrowserFetch_" + Date.now();
+    const bfResId = "resBrowserFetch_" + Date.now();
+    if (j.correct_item_url) {
+      lines.push(`<button id="${bfBtnId}" class="btn btn-secondary btn-sm" style="margin-top:6px">🌐 Browser fetch (прямо из браузера)</button>`);
+      lines.push(`<div id="${bfResId}" style="font-size:11px;margin-top:4px;"></div>`);
+    }
+
     lines.push("");
     lines.push(`<details><summary>Полный JSON</summary><pre style="white-space:pre-wrap;word-break:break-all;font-size:10px;">${esc(JSON.stringify(j, null, 2))}</pre></details>`);
     el.innerHTML = lines.join("<br>");
+
+    // attach browser-fetch listener after DOM is rendered
+    if (j.correct_item_url) {
+      document.getElementById(bfBtnId)?.addEventListener("click", async () => {
+        const resEl = document.getElementById(bfResId);
+        const targetUrl = j.correct_item_url;
+        resEl.innerHTML = "⏳ Fetching…";
+        const UUID_RE2 = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+        try {
+          const resp = await fetch(targetUrl, {
+            headers: { Accept: "application/json" },
+            credentials: "omit",
+          });
+          if (!resp.ok) {
+            resEl.innerHTML = `<span style="color:var(--yellow)">HTTP ${resp.status} — CDN заблокировал из браузера тоже.</span> <a href="${esc(targetUrl)}" target="_blank" style="color:var(--cyan)">Открыть в новой вкладке →</a>`;
+            return;
+          }
+          const body = await resp.json();
+          const bodyStr = JSON.stringify(body, null, 2);
+          const uuids = [...new Set(bodyStr.match(UUID_RE2) || [])];
+          if (uuids.length) {
+            resEl.innerHTML = `<b style="color:var(--green)">✓ UUID найден: ${esc(uuids.join(", "))}</b><br><pre style="white-space:pre-wrap;word-break:break-all;font-size:10px;max-height:200px;overflow-y:auto">${esc(bodyStr.substring(0,2000))}</pre>`;
+          } else {
+            resEl.innerHTML = `<span style="color:var(--yellow)">Ответ 200, UUID не найден.</span><br><pre style="white-space:pre-wrap;word-break:break-all;font-size:10px;max-height:200px;overflow-y:auto">${esc(bodyStr.substring(0,2000))}</pre>`;
+          }
+        } catch(fetchErr) {
+          const isCors = fetchErr.message.toLowerCase().includes("cors") || fetchErr.message.includes("Failed to fetch") || fetchErr.message.includes("Load failed");
+          if (isCors) {
+            resEl.innerHTML = `<span style="color:var(--yellow)">CORS заблокировал браузерный fetch.</span><br><a href="${esc(targetUrl)}" target="_blank" style="color:var(--cyan)">Открыть в новой вкладке →</a> (скопируй UUID из metadata.json вручную)`;
+          } else {
+            resEl.innerHTML = `<span style="color:var(--red)">Ошибка: ${esc(fetchErr.message)}</span>`;
+          }
+        }
+      });
+    }
   } catch(e) {
     el.innerHTML = `<span style="color:var(--red)">Ошибка: ${esc(e.message)}</span>`;
   }

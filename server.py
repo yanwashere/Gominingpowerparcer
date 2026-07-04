@@ -610,6 +610,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "name": meta.get("name"),
                 "image": meta.get("image"),
                 "external_url": meta.get("external_url"),
+                "buttons": meta.get("buttons"),
+                "attributes": meta.get("attributes"),
                 "metadata_keys": list(meta.keys()),
                 "top_level_keys": list(nft.keys()),
                 "uuids_found": list(set(UUID_RE.findall(all_meta))),
@@ -691,8 +693,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 req.add_header("Origin", "https://getgems.io")
                 req.add_header("Referer", "https://getgems.io/")
                 req.add_header("Accept-Language", "en-US,en;q=0.9")
-                req.add_header("sec-ch-ua", '"Google Chrome";v="125"')
+                req.add_header("sec-ch-ua", '"Google Chrome";v="125", "Chromium";v="125"')
+                req.add_header("sec-ch-ua-mobile", "?0")
                 req.add_header("sec-ch-ua-platform", '"macOS"')
+                req.add_header("sec-fetch-dest", "empty")
+                req.add_header("sec-fetch-mode", "cors")
+                req.add_header("sec-fetch-site", "same-site")
             if extra_headers:
                 for k, v in extra_headers.items():
                     req.add_header(k, v)
