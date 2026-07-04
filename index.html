@@ -2367,7 +2367,7 @@ async function debugNftBlockchain() {
     // metadata URL probes
     const probes = j.results?.metadata_url_probes || {};
     if (Object.keys(probes).length) {
-      lines.push("<b>Проверка metadata URL GoMining:</b>");
+      lines.push("<b>Проверка metadata URL (CDN):</b>");
       for (const [url, v] of Object.entries(probes)) {
         const short = url.replace("https://", "");
         if (v.ok) {
@@ -2377,7 +2377,7 @@ async function debugNftBlockchain() {
           const keys = Array.isArray(v.keys) ? v.keys.join(", ") : String(v.keys);
           lines.push(`&nbsp;&nbsp;✓ <b>${esc(short)}</b> поля: [${esc(keys)}]${uuids}`);
           if (v.preview && Object.keys(v.preview).length) {
-            for (const [k, val] of Object.entries(v.preview).slice(0, 5)) {
+            for (const [k, val] of Object.entries(v.preview).slice(0, 4)) {
               lines.push(`&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--muted)">${esc(k)}:</span> ${esc(String(val).substring(0,100))}`);
             }
           }
@@ -2386,6 +2386,47 @@ async function debugNftBlockchain() {
         }
       }
     }
+    lines.push("");
+
+    // GoMining API probes section
+    const gmProbes = j.results?.gomining_api_probes || {};
+    const gmKeys = Object.keys(gmProbes);
+    if (gmKeys.length) {
+      lines.push("<b>GoMining API probes (поиск UUID по tokenId/address):</b>");
+      for (const [key, v] of Object.entries(gmProbes)) {
+        const label = key.replace("https://api.gomining.com", "");
+        if (key === "buttons_uri_redirect") {
+          const finalUrl = v.final_url || v.original || key;
+          const uuids = v.uuids_found?.length
+            ? ` <b style="color:var(--green)">→ UUID в redirect URL: ${esc(v.uuids_found[0])}</b>`
+            : ` (UUID не найден в финальном URL)`;
+          const status = v.http_status ? ` HTTP ${v.http_status}` : (v.error ? ` error: ${v.error}` : "");
+          lines.push(`&nbsp;&nbsp;🔀 buttons redirect: ${esc(String(finalUrl).substring(0,100))}${status}${uuids}`);
+        } else if (v.ok) {
+          const uuids = v.uuids_found?.length
+            ? ` <b style="color:var(--green)">→ UUID: ${esc(v.uuids_found[0])}</b>`
+            : ` <span style="color:var(--yellow)">→ UUID не найден</span>`;
+          const keys2 = Array.isArray(v.keys) ? v.keys.join(", ") : String(v.keys);
+          lines.push(`&nbsp;&nbsp;✓ <b>${esc(label)}</b> (${v.http_status}) поля: [${esc(keys2)}]${uuids}`);
+          if (v.preview && Object.keys(v.preview).length) {
+            for (const [k, val] of Object.entries(v.preview).slice(0, 4)) {
+              lines.push(`&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--muted)">${esc(k)}:</span> ${esc(String(val).substring(0,100))}`);
+            }
+          }
+        } else {
+          const detail = v.http_status ? `HTTP ${v.http_status}` : (v.error || "?");
+          const body = v.body ? ` — ${esc(v.body.substring(0,80))}` : "";
+          lines.push(`&nbsp;&nbsp;<span style="color:var(--muted)">${esc(label)}: ${detail}${body}</span>`);
+        }
+      }
+    }
+    lines.push("");
+
+    // getgems GraphQL from BROWSER (might return externalLink with UUID)
+    const ggBtnId = "btnGGFetch_" + Date.now();
+    const ggResId = "resGGFetch_" + Date.now();
+    lines.push(`<button id="${ggBtnId}" class="btn btn-secondary btn-sm" style="margin-top:4px">🔷 getgems GraphQL (из браузера)</button>`);
+    lines.push(`<div id="${ggResId}" style="font-size:11px;margin-top:4px;"></div>`);
 
     // browser-side fetch button (might succeed where server→CDN gets 403)
     const bfBtnId = "btnBrowserFetch_" + Date.now();
@@ -2398,6 +2439,39 @@ async function debugNftBlockchain() {
     lines.push("");
     lines.push(`<details><summary>Полный JSON</summary><pre style="white-space:pre-wrap;word-break:break-all;font-size:10px;">${esc(JSON.stringify(j, null, 2))}</pre></details>`);
     el.innerHTML = lines.join("<br>");
+
+    // wire up getgems GraphQL browser-side button
+    document.getElementById(ggBtnId)?.addEventListener("click", async () => {
+      const resEl = document.getElementById(ggResId);
+      resEl.innerHTML = "⏳ Запрашиваем getgems GraphQL из браузера…";
+      const UUID_RE3 = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+      try {
+        const data = await gqlPost(GQL_NFT_BY_ADDRESS, { address: addr.trim() });
+        const item = data?.alphaNftItem;
+        if (!item) {
+          resEl.innerHTML = `<span style="color:var(--yellow)">alphaNftItem = null (NFT не найден в getgems)</span>`;
+          return;
+        }
+        const itemStr = JSON.stringify(item, null, 2);
+        const uuids = [...new Set(itemStr.match(UUID_RE3) || [])];
+        const extLink = item.externalLink || item.externalUrl || "";
+        const ggLines = [];
+        if (uuids.length) {
+          ggLines.push(`<b style="color:var(--green)">✓ UUID найден: ${esc(uuids.join(", "))}</b>`);
+        } else {
+          ggLines.push(`<span style="color:var(--yellow)">UUID не найден</span>`);
+        }
+        ggLines.push(`externalLink: <b>${esc(extLink || "(пусто)")}</b>`);
+        ggLines.push(`Поля: [${esc(Object.keys(item).join(", "))}]`);
+        if (item.attributes?.length) {
+          ggLines.push(`attributes: <code style="font-size:10px">${esc(JSON.stringify(item.attributes).substring(0, 300))}</code>`);
+        }
+        ggLines.push(`<details><summary>Полный item JSON</summary><pre style="font-size:10px;white-space:pre-wrap;word-break:break-all">${esc(itemStr.substring(0,3000))}</pre></details>`);
+        resEl.innerHTML = ggLines.join("<br>");
+      } catch(gqlErr) {
+        resEl.innerHTML = `<span style="color:var(--red)">GraphQL ошибка: ${esc(gqlErr.message)}</span>`;
+      }
+    });
 
     // attach browser-fetch listener after DOM is rendered
     if (j.correct_item_url) {
@@ -2469,7 +2543,19 @@ async function debugGetgemsNft() {
       const gql = j.results?.graphql;
       if (gql) {
         if (!gql.ok) {
-          lines.push(`<b>GraphQL:</b> <span style="color:var(--red)">HTTP ${gql.http_status || "?"} — ${esc(gql.body || gql.error || "")}</span>`);
+          lines.push(`<b>GraphQL: HTTP ${gql.http_status || "?"}</b>`);
+          // Show URLs found in the error body — these point to the official API
+          if (gql.urls_in_error?.length) {
+            lines.push(`<b style="color:var(--cyan)">🔗 URL из тела ошибки (официальный API getgems):</b>`);
+            for (const u of gql.urls_in_error) {
+              lines.push(`&nbsp;&nbsp;<a href="${esc(u)}" target="_blank" style="color:var(--cyan)">${esc(u)}</a>`);
+            }
+          }
+          if (gql.body) {
+            lines.push(`<details><summary>Полный body ошибки</summary><pre style="font-size:10px;white-space:pre-wrap;word-break:break-all;max-height:200px;overflow-y:auto">${esc(gql.body)}</pre></details>`);
+          } else if (gql.error) {
+            lines.push(`<span style="color:var(--muted)">${esc(gql.error)}</span>`);
+          }
         } else {
           const extLink = gql.item?.externalLink || "";
           lines.push(`<b>GraphQL externalLink:</b> ${esc(extLink || "(пусто)")}`);

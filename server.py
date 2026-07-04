@@ -726,16 +726,99 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if collection_meta_url:
             _probe(collection_meta_url)
 
-        # Fallback: known GoMining domains + decoded path
+        # Fallback: known GoMining CDN domains + decoded path
         if decoded_path:
             for base in [
                 "https://nft.gomining.com",
-                "https://cdn.gomining.com/nft",
                 "https://api.gomining.com/nft-metadata",
             ]:
                 _probe(f"{base}/{decoded_path.lstrip('/')}")
 
         results["metadata_url_probes"] = metadata_probes
+
+        # ── 5. GoMining API probes — try to find UUID by token index / address ────
+        gm_probes: dict = {}
+
+        def _probe_gm(url: str, headers_extra: dict | None = None) -> None:
+            req = urllib.request.Request(url)
+            req.add_header("Accept", "application/json")
+            req.add_header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+            req.add_header("Origin", "https://app.gomining.com")
+            req.add_header("Referer", "https://app.gomining.com/")
+            if headers_extra:
+                for k, v in headers_extra.items():
+                    req.add_header(k, v)
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    body = json.loads(resp.read())
+                    body_str = json.dumps(body)
+                    uuids = list(set(UUID_RE.findall(body_str)))
+                    gm_probes[url] = {
+                        "ok": True,
+                        "http_status": resp.status,
+                        "uuids_found": uuids,
+                        "keys": list(body.keys()) if isinstance(body, dict) else "list",
+                        "preview": {k: str(v)[:120] for k, v in list(body.items())[:8]} if isinstance(body, dict) else {},
+                    }
+            except urllib.error.HTTPError as e:
+                try:
+                    err_body = e.read().decode(errors="replace")[:200]
+                except Exception:
+                    err_body = ""
+                gm_probes[url] = {"ok": False, "http_status": e.code, "body": err_body}
+            except Exception as ex:
+                gm_probes[url] = {"ok": False, "error": str(ex)[:80]}
+
+        tok_index = (nft or {}).get("index")
+        if tok_index is not None:
+            # GoMining API: try various endpoint patterns with token index
+            for ep in [
+                f"/api/nft/get-by-token-id?tokenId={tok_index}",
+                f"/api/nft/{tok_index}",
+                f"/api/nft/details/{tok_index}",
+                f"/api/nft/info?tokenId={tok_index}",
+                f"/api/marketplace/nft/{tok_index}",
+            ]:
+                _probe_gm(f"https://api.gomining.com{ep}")
+
+        # Try by TON address
+        _probe_gm(f"https://api.gomining.com/api/nft/by-address?address={urllib.parse.quote(nft_addr, safe='')}")
+        _probe_gm(f"https://api.gomining.com/api/nft/ton/{urllib.parse.quote(nft_addr, safe='')}")
+
+        # Try following the buttons URI (might redirect to GoMining app with UUID)
+        buttons_uri = None
+        if meta.get("buttons") and isinstance(meta["buttons"], list):
+            first_btn = meta["buttons"][0]
+            if isinstance(first_btn, dict):
+                buttons_uri = first_btn.get("uri") or first_btn.get("url")
+        if buttons_uri and "gomining" not in buttons_uri.lower():
+            # follow redirect without reading body — just capture final URL
+            try:
+                req = urllib.request.Request(buttons_uri)
+                req.add_header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+                req.add_header("Accept", "text/html,application/xhtml+xml,*/*")
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    final_url = resp.url
+                    uuids_in_redirect = list(set(UUID_RE.findall(final_url)))
+                    gm_probes["buttons_uri_redirect"] = {
+                        "original": buttons_uri,
+                        "final_url": final_url,
+                        "uuids_found": uuids_in_redirect,
+                    }
+            except urllib.error.HTTPError as e:
+                gm_probes["buttons_uri_redirect"] = {
+                    "original": buttons_uri,
+                    "http_status": e.code,
+                    "uuids_found": [],
+                }
+            except Exception as ex:
+                gm_probes["buttons_uri_redirect"] = {
+                    "original": buttons_uri,
+                    "error": str(ex)[:80],
+                    "uuids_found": [],
+                }
+
+        results["gomining_api_probes"] = gm_probes
 
         # ── Summary: only collect actual UUID-format strings ─────────────────────
         all_uuids: set = set()
@@ -813,18 +896,38 @@ query Q($address: String!) {
                 "errors": gql_raw.get("errors", []),
             }
         except urllib.error.HTTPError as e:
-            results["graphql"] = {"ok": False, "http_status": e.code, "body": e.read().decode()[:300]}
+            raw_body = e.read().decode(errors="replace")
+            urls_in_error = _re.findall(r"https?://[^\s\"'\\}<>\]]+", raw_body)
+            results["graphql"] = {
+                "ok": False,
+                "http_status": e.code,
+                "body": raw_body[:2000],
+                "urls_in_error": urls_in_error,
+            }
         except Exception as ex:
             results["graphql"] = {"ok": False, "error": str(ex)}
 
-        # ── 2. getgems public REST API (https://getgems.io/public-api) ────────────
-        # Try known REST endpoints that getgems advertises
-        rest_urls = [
-            f"https://api.getgems.io/v2/nft/item/{nft_addr}",
-            f"https://api.getgems.io/v2/nft/{nft_addr}",
-            f"https://api.getgems.io/v1/nft/{nft_addr}",
+        # ── 2. Official API from error body + known REST endpoints ────────────────
+        official_urls_to_try: list[str] = []
+
+        # Extract URLs from error body and try them with the NFT address
+        for err_url in results.get("graphql", {}).get("urls_in_error", []):
+            if "getgems" in err_url and "graphql" not in err_url:
+                official_urls_to_try.append(err_url.rstrip("/") + "/" + urllib.parse.quote(nft_addr, safe=""))
+                official_urls_to_try.append(err_url)  # also try as-is (might be a docs URL)
+
+        # Known REST endpoint patterns (fallback if error has no URL)
+        official_urls_to_try += [
+            f"https://api.getgems.io/v2/nft/item/{urllib.parse.quote(nft_addr, safe='')}",
+            f"https://api.getgems.io/v2/nft/{urllib.parse.quote(nft_addr, safe='')}",
+            f"https://api.getgems.io/v1/nft/{urllib.parse.quote(nft_addr, safe='')}",
         ]
-        for url in rest_urls:
+
+        seen_urls: set = set()
+        for url in official_urls_to_try:
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
             rest_req = urllib.request.Request(url)
             for k, v in self._getgems_headers().items():
                 rest_req.add_header(k, v)
@@ -841,10 +944,10 @@ query Q($address: String!) {
                     "external_link": rest_raw.get("externalLink") or rest_raw.get("external_url") or rest_raw.get("external_link"),
                 }
                 break
-            except urllib.error.HTTPError as e:
-                results[f"rest_{url.split('/')[-2]}"] = {"ok": False, "http_status": e.code}
-            except Exception as ex:
-                results[f"rest_err"] = {"ok": False, "error": str(ex)[:80]}
+            except urllib.error.HTTPError as e2:
+                results[f"rest_{urllib.parse.quote(url, safe='')[-40:]}"] = {"ok": False, "http_status": e2.code, "url": url}
+            except Exception as ex2:
+                results[f"rest_err_{url[-30:]}"] = {"ok": False, "error": str(ex2)[:80], "url": url}
 
         # ── Summary ───────────────────────────────────────────────────────────────
         all_uuids = set()
