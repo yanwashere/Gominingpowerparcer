@@ -348,6 +348,7 @@
         <button class="btn btn-secondary btn-sm" onclick="clearSettings()">🗑️ Очистить токены</button>
         <button class="btn btn-secondary btn-sm" onclick="testApis()">🔬 Тест API</button>
         <button class="btn btn-secondary btn-sm" id="btnDebugGG" onclick="debugGetgemsNft()" style="display:none;">🔎 Debug getgems NFT</button>
+        <button class="btn btn-secondary btn-sm" id="btnDebugChain" onclick="debugNftBlockchain()" style="display:none;">⛓ Debug блокчейн NFT</button>
         <span id="localPasteHint" style="display:none; font-size:12px; color:var(--muted);">Или вставьте токен выше и нажмите Сохранить — он отправится на локальный сервер.</span>
       </div>
       <div id="apiTestResult" class="hidden" style="margin-top:8px; font-size:12px; font-family:monospace; background:var(--bg); padding:10px; border-radius:6px; border:1px solid var(--border); line-height:1.8;"></div>
@@ -2279,6 +2280,7 @@ async function initLocalMode() {
   document.getElementById("localProxyNote").style.display = "inline";
   document.getElementById("localPasteHint").style.display = "inline";
   document.getElementById("btnDebugGG").style.display = "inline-flex";
+  document.getElementById("btnDebugChain").style.display = "inline-flex";
 
   await checkLocalToken();
 
@@ -2287,6 +2289,77 @@ async function initLocalMode() {
 }
 
 // Debug: query getgems GraphQL for a known GoMining miner to see what externalLink returns
+async function debugNftBlockchain() {
+  const el = document.getElementById("apiTestResult");
+  el.classList.remove("hidden");
+  el.innerHTML = "⏳ Запрашиваем tonapi + блокчейн...";
+
+  const defaultAddr = "EQB3XoyBDVKjr75cH7q9A2mqF9OdVfh-bn_CV-uLpDe_KhUJ";
+  const addr = prompt("NFT адрес для проверки (EQ...):", defaultAddr);
+  if (!addr) { el.classList.add("hidden"); return; }
+
+  const key = getSettings().tonapiKey || "";
+  try {
+    const r = await fetch(`/debug-nft-blockchain?addr=${encodeURIComponent(addr.trim())}&key=${encodeURIComponent(key)}`);
+    const j = await r.json();
+    const lines = [];
+    lines.push(`<b>Адрес:</b> ${esc(addr.trim())}`);
+    lines.push("");
+
+    if (j.all_uuids_found?.length) {
+      lines.push(`<b style="color:var(--green)">✓ UUID найден: ${esc(j.all_uuids_found.join(", "))}</b>`);
+    } else {
+      lines.push(`<span style="color:var(--yellow)">UUID нигде не найден</span>`);
+    }
+    lines.push("");
+
+    // tonapi NFT section
+    const tn = j.results?.tonapi_nft;
+    if (tn) {
+      lines.push(`<b>tonapi NFT (HTTP ${tn.http_status}):</b>`);
+      lines.push(`&nbsp;&nbsp;Индекс: ${tn.index ?? "?"} | Имя: ${esc(tn.name || "?")} `);
+      lines.push(`&nbsp;&nbsp;metadata поля: [${esc(tn.metadata_keys?.join(", ") || "нет")}]`);
+      lines.push(`&nbsp;&nbsp;top-level поля: [${esc(tn.top_level_keys?.join(", ") || "нет")}]`);
+      lines.push(`&nbsp;&nbsp;external_url: ${esc(tn.external_url || "(пусто)")}`);
+      lines.push(`&nbsp;&nbsp;image: ${esc(tn.image || "(пусто)")}`);
+      lines.push(`&nbsp;&nbsp;individual_content: ${esc(String(tn.individual_content ?? "(нет поля)"))}`);
+      if (tn.uuids_found?.length) lines.push(`&nbsp;&nbsp;<span style="color:var(--green)">UUID в metadata: ${esc(tn.uuids_found.join(", "))}</span>`);
+    }
+    lines.push("");
+
+    // blockchain section
+    const bc = j.results?.blockchain_get_nft_data;
+    if (bc) {
+      lines.push(`<b>blockchain get_nft_data (HTTP ${bc.http_status}):</b>`);
+      lines.push(`&nbsp;&nbsp;decoded поля: [${esc(bc.decoded_keys?.join(", ") || "нет")}]`);
+      lines.push(`&nbsp;&nbsp;individual_content: <b>${esc(String(bc.decoded_individual_content ?? "(нет)"))}</b>`);
+      if (bc.uuids_in_stack?.length) lines.push(`&nbsp;&nbsp;<span style="color:var(--green)">UUID в стеке: ${esc(bc.uuids_in_stack.join(", "))}</span>`);
+    }
+    lines.push("");
+
+    // metadata URL probes
+    const probes = j.results?.metadata_url_probes || {};
+    if (Object.keys(probes).length) {
+      lines.push("<b>Проверка metadata URL GoMining:</b>");
+      for (const [url, v] of Object.entries(probes)) {
+        const short = url.replace("https://", "");
+        if (v.ok) {
+          const uuids = v.uuids_found?.length ? ` → UUID: ${v.uuids_found[0]}` : " → UUID не найден";
+          lines.push(`&nbsp;&nbsp;<span style="color:var(--green)">✓ ${esc(short)}</span> (поля: ${esc(v.keys?.toString())}${uuids})`);
+        } else {
+          lines.push(`&nbsp;&nbsp;<span style="color:var(--muted)">${esc(short)}: HTTP ${v.http_status || v.error || "?"}</span>`);
+        }
+      }
+    }
+
+    lines.push("");
+    lines.push(`<details><summary>Полный JSON</summary><pre style="white-space:pre-wrap;word-break:break-all;font-size:10px;">${esc(JSON.stringify(j, null, 2))}</pre></details>`);
+    el.innerHTML = lines.join("<br>");
+  } catch(e) {
+    el.innerHTML = `<span style="color:var(--red)">Ошибка: ${esc(e.message)}</span>`;
+  }
+}
+
 async function debugGetgemsNft() {
   const el = document.getElementById("apiTestResult");
   el.classList.remove("hidden");

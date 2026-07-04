@@ -511,6 +511,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(200, result)
             return
 
+        # ── /debug-nft-blockchain — get_nft_data + metadata URL probe ───────────
+        if path == "/debug-nft-blockchain":
+            addr = qs.get("addr", [""])[0].strip()
+            tonapi_key = qs.get("key", [""])[0].strip()
+            if not addr:
+                self.send_json(400, {"error": "addr required"})
+                return
+            result = self._debug_nft_blockchain(addr, tonapi_key)
+            self.send_json(200, result)
+            return
+
         # ── /debug-getgems-nft — query getgems GraphQL for an NFT address ────────
         if path == "/debug-getgems-nft":
             addr = qs.get("addr", [""])[0].strip()
@@ -522,6 +533,134 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         self.send_json(404, {"error": "not found"})
+
+    def _debug_nft_blockchain(self, nft_addr: str, tonapi_key: str = "") -> dict:
+        """
+        Deep-probe an NFT by:
+        1. tonapi /v2/nfts/{addr}  — parsed metadata
+        2. tonapi blockchain get_nft_data — raw individual_content from chain
+        3. Construct possible GoMining metadata URLs and fetch them
+        All of this requires NO GoMining auth token.
+        """
+        import re as _re
+        UUID_RE = _re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", _re.I)
+        results = {}
+
+        def _tonapi_get(path: str, params: dict | None = None) -> tuple[int, dict | None]:
+            url = f"https://tonapi.io{path}"
+            if params:
+                url += "?" + urllib.parse.urlencode(params)
+            req = urllib.request.Request(url)
+            req.add_header("Accept", "application/json")
+            if tonapi_key:
+                req.add_header("Authorization", f"Bearer {tonapi_key}")
+            try:
+                with urllib.request.urlopen(req, timeout=12) as resp:
+                    return resp.status, json.loads(resp.read())
+            except urllib.error.HTTPError as e:
+                return e.code, None
+            except Exception as ex:
+                return 0, {"error": str(ex)}
+
+        # ── 1. tonapi NFT metadata ────────────────────────────────────────────────
+        addr_enc = urllib.parse.quote(nft_addr, safe="")
+        status, nft = _tonapi_get(f"/v2/nfts/{addr_enc}")
+        if nft:
+            meta = nft.get("metadata") or {}
+            all_meta = json.dumps(nft)
+            uuids_in_meta = list(set(UUID_RE.findall(all_meta)))
+            results["tonapi_nft"] = {
+                "http_status": status,
+                "index": nft.get("index"),
+                "name": meta.get("name"),
+                "image": meta.get("image"),
+                "external_url": meta.get("external_url"),
+                "metadata_keys": list(meta.keys()),
+                "top_level_keys": list(nft.keys()),
+                "uuids_found": uuids_in_meta,
+                "individual_content": nft.get("individual_content"),
+            }
+        else:
+            results["tonapi_nft"] = {"http_status": status, "error": "no data"}
+
+        # ── 2. blockchain get_nft_data — gives raw individual_content ─────────────
+        status2, chain = _tonapi_get(
+            f"/v2/blockchain/accounts/{addr_enc}/methods/get_nft_data"
+        )
+        if chain:
+            decoded = chain.get("decoded") or {}
+            stack = chain.get("stack") or []
+            ind_content = decoded.get("individual_content")
+            # Also scan the full stack JSON for UUID or readable strings
+            stack_str = json.dumps(stack)
+            uuids_in_stack = list(set(UUID_RE.findall(stack_str)))
+            results["blockchain_get_nft_data"] = {
+                "http_status": status2,
+                "decoded_keys": list(decoded.keys()),
+                "decoded_index": decoded.get("index"),
+                "decoded_individual_content": ind_content,
+                "decoded_owner": decoded.get("owner_address"),
+                "stack_len": len(stack),
+                "uuids_in_stack": uuids_in_stack,
+                "raw_stack_preview": stack[:2] if stack else [],
+            }
+        else:
+            results["blockchain_get_nft_data"] = {"http_status": status2, "error": "no data"}
+
+        # ── 3. Try GoMining metadata URLs based on what individual_content gave us ─
+        # Guess: index from tonapi, individual_content from blockchain
+        index = (nft or {}).get("index")
+        ind = (chain or {}).get("decoded", {}).get("individual_content") if chain else None
+
+        # Build candidate metadata URLs
+        candidates: list[str] = []
+        for domain in ["https://nft.gomining.com", "https://api.gomining.com/nft-metadata"]:
+            if ind:
+                candidates.append(f"{domain}/{ind}")
+            if index is not None:
+                candidates.append(f"{domain}/{index}")
+
+        metadata_probes = {}
+        for url in candidates:
+            req = urllib.request.Request(url)
+            req.add_header("Accept", "application/json")
+            req.add_header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+            try:
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    body_bytes = resp.read()
+                    body = json.loads(body_bytes)
+                    all_text = json.dumps(body)
+                    uuids = list(set(UUID_RE.findall(all_text)))
+                    metadata_probes[url] = {
+                        "ok": True,
+                        "http_status": resp.status,
+                        "keys": list(body.keys()) if isinstance(body, dict) else f"list[{len(body)}]",
+                        "uuids_found": uuids,
+                        "preview": {k: str(v)[:100] for k, v in (body.items() if isinstance(body, dict) else {})},
+                    }
+            except urllib.error.HTTPError as e:
+                metadata_probes[url] = {"ok": False, "http_status": e.code}
+            except Exception as ex:
+                metadata_probes[url] = {"ok": False, "error": str(ex)[:80]}
+
+        results["metadata_url_probes"] = metadata_probes
+
+        # ── Summary ───────────────────────────────────────────────────────────────
+        all_uuids = set()
+        for v in results.values():
+            if isinstance(v, dict):
+                all_uuids.update(v.get("uuids_found", []))
+                all_uuids.update(v.get("uuids_in_stack", []))
+                for vv in v.values():
+                    if isinstance(vv, dict):
+                        all_uuids.update(vv.get("uuids_found", []))
+
+        return {
+            "ok": True,
+            "addr": nft_addr,
+            "all_uuids_found": list(all_uuids),
+            "results": results,
+        }
 
     @staticmethod
     def _getgems_headers() -> dict:
