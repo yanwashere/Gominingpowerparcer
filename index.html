@@ -2317,12 +2317,9 @@ async function debugNftBlockchain() {
     const tn = j.results?.tonapi_nft;
     if (tn) {
       lines.push(`<b>tonapi NFT (HTTP ${tn.http_status}):</b>`);
-      lines.push(`&nbsp;&nbsp;Индекс: ${tn.index ?? "?"} | Имя: ${esc(tn.name || "?")} `);
+      lines.push(`&nbsp;&nbsp;Индекс: ${tn.index ?? "?"} | Имя: ${esc(tn.name || "?")}`);
       lines.push(`&nbsp;&nbsp;metadata поля: [${esc(tn.metadata_keys?.join(", ") || "нет")}]`);
-      lines.push(`&nbsp;&nbsp;top-level поля: [${esc(tn.top_level_keys?.join(", ") || "нет")}]`);
       lines.push(`&nbsp;&nbsp;external_url: ${esc(tn.external_url || "(пусто)")}`);
-      lines.push(`&nbsp;&nbsp;image: ${esc(tn.image || "(пусто)")}`);
-      lines.push(`&nbsp;&nbsp;individual_content: ${esc(String(tn.individual_content ?? "(нет поля)"))}`);
       if (tn.uuids_found?.length) lines.push(`&nbsp;&nbsp;<span style="color:var(--green)">UUID в metadata: ${esc(tn.uuids_found.join(", "))}</span>`);
     }
     lines.push("");
@@ -2331,11 +2328,28 @@ async function debugNftBlockchain() {
     const bc = j.results?.blockchain_get_nft_data;
     if (bc) {
       lines.push(`<b>blockchain get_nft_data (HTTP ${bc.http_status}):</b>`);
-      lines.push(`&nbsp;&nbsp;decoded поля: [${esc(bc.decoded_keys?.join(", ") || "нет")}]`);
-      lines.push(`&nbsp;&nbsp;individual_content: <b>${esc(String(bc.decoded_individual_content ?? "(нет)"))}</b>`);
+      lines.push(`&nbsp;&nbsp;individual_content BOC: <code style="font-size:10px">${esc(bc.individual_content_boc || "(нет)")}</code>`);
+      const decoded = bc.individual_content_decoded;
+      lines.push(`&nbsp;&nbsp;individual_content <b>декодирован</b>: <b style="color:var(--cyan)">${esc(decoded || "(не удалось)")}</b>`);
+      lines.push(`&nbsp;&nbsp;collection_address: ${esc(bc.collection_address || "?")}`);
       if (bc.uuids_in_stack?.length) lines.push(`&nbsp;&nbsp;<span style="color:var(--green)">UUID в стеке: ${esc(bc.uuids_in_stack.join(", "))}</span>`);
     }
     lines.push("");
+
+    // collection data
+    const cd = j.results?.blockchain_get_collection_data;
+    if (cd) {
+      lines.push(`<b>get_collection_data (HTTP ${cd.http_status}):</b>`);
+      lines.push(`&nbsp;&nbsp;collection_content BOC: <code style="font-size:10px">${esc(String(cd.collection_content_boc || "(нет)").substring(0,60))}</code>`);
+      lines.push(`&nbsp;&nbsp;base URL <b>декодирован</b>: <b style="color:var(--cyan)">${esc(cd.collection_content_decoded || "(не удалось)")}</b>`);
+    }
+    lines.push("");
+
+    // full constructed URL
+    if (j.full_metadata_url) {
+      lines.push(`<b>Полный metadata URL:</b> <code>${esc(j.full_metadata_url)}</code>`);
+      lines.push("");
+    }
 
     // metadata URL probes
     const probes = j.results?.metadata_url_probes || {};
@@ -2344,8 +2358,16 @@ async function debugNftBlockchain() {
       for (const [url, v] of Object.entries(probes)) {
         const short = url.replace("https://", "");
         if (v.ok) {
-          const uuids = v.uuids_found?.length ? ` → UUID: ${v.uuids_found[0]}` : " → UUID не найден";
-          lines.push(`&nbsp;&nbsp;<span style="color:var(--green)">✓ ${esc(short)}</span> (поля: ${esc(v.keys?.toString())}${uuids})`);
+          const uuids = v.uuids_found?.length
+            ? ` <span style="color:var(--green)">→ UUID: ${esc(v.uuids_found[0])}</span>`
+            : ` <span style="color:var(--yellow)">→ UUID не найден</span>`;
+          const keys = Array.isArray(v.keys) ? v.keys.join(", ") : String(v.keys);
+          lines.push(`&nbsp;&nbsp;✓ <b>${esc(short)}</b> поля: [${esc(keys)}]${uuids}`);
+          if (v.preview && Object.keys(v.preview).length) {
+            for (const [k, val] of Object.entries(v.preview).slice(0, 5)) {
+              lines.push(`&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--muted)">${esc(k)}:</span> ${esc(String(val).substring(0,100))}`);
+            }
+          }
         } else {
           lines.push(`&nbsp;&nbsp;<span style="color:var(--muted)">${esc(short)}: HTTP ${v.http_status || v.error || "?"}</span>`);
         }
