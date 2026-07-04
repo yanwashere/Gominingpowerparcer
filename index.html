@@ -738,12 +738,19 @@ function parseTonapiNft(item) {
 
   // Extract GoMining externalUrlId — search ALL possible locations in tonapi response
   const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+  // GoMining view URL: https://app.gmt.io/nft/view/{id}  or  https://account.gmt.io/nft/view/{id}
+  const GM_VIEW_RE = /(?:app|account)\.gmt\.io\/nft\/view\/([0-9a-zA-Z-]+)|gomining\.com\/nft\/view\/([0-9a-zA-Z-]+)/;
   let externalUrlId = null;
 
   // 1. metadata.external_url / metadata.url (standard NFT field)
   const extUrl = meta.external_url || meta.externalUrl || meta.url || "";
   const uuidMatch = extUrl.match(UUID_RE);
   if (uuidMatch) externalUrlId = uuidMatch[0];
+  // Also handle numeric IDs from GoMining view URLs (e.g. account.gmt.io/nft/view/113275)
+  if (!externalUrlId) {
+    const viewMatch = extUrl.match(GM_VIEW_RE);
+    if (viewMatch) externalUrlId = viewMatch[1] || viewMatch[2];
+  }
 
   // 2. Top-level item fields tonapi might put the URL in
   if (!externalUrlId) {
