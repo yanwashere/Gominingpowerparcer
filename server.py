@@ -602,7 +602,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # ── 1. tonapi NFT metadata ────────────────────────────────────────────────
         status, nft = _tonapi_get(f"/v2/nfts/{addr_enc}")
         meta = (nft or {}).get("metadata") or {}
+        # extract owner wallet for wallet-based GoMining lookups
+        owner_wallet: str | None = None
         if nft:
+            owner_obj = nft.get("owner") or {}
+            owner_wallet = owner_obj.get("address") if isinstance(owner_obj, dict) else None
             all_meta = json.dumps(nft)
             results["tonapi_nft"] = {
                 "http_status": status,
@@ -610,6 +614,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "name": meta.get("name"),
                 "image": meta.get("image"),
                 "external_url": meta.get("external_url"),
+                "owner_wallet": owner_wallet,
                 "buttons": meta.get("buttons"),
                 "attributes": meta.get("attributes"),
                 "metadata_keys": list(meta.keys()),
@@ -745,6 +750,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             req.add_header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
             req.add_header("Origin", "https://app.gomining.com")
             req.add_header("Referer", "https://app.gomining.com/")
+            if Handler.token:
+                req.add_header("Authorization", f"Bearer {Handler.token}")
             if headers_extra:
                 for k, v in headers_extra.items():
                     req.add_header(k, v)
@@ -817,6 +824,44 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "error": str(ex)[:80],
                     "uuids_found": [],
                 }
+
+        # Wallet-based lookups — try the owner's wallet address
+        # GoMining might have public-read endpoints (like get-by-external-url-id)
+        # that don't check ownership, only require auth
+        wallets_to_try: list[str] = []
+        if owner_wallet:
+            wallets_to_try.append(owner_wallet)
+        # Also try UQ-form if owner_wallet looks like raw (0:...)
+        for w in list(wallets_to_try):
+            if w.startswith("0:"):
+                try:
+                    # convert 0:hex → UQ... (non-bounceable) by naive base64url
+                    import base64
+                    raw_bytes = b"\x51\xb8" + bytes.fromhex(w[2:])  # workchain=0 non-bounceable
+                    crc = 0
+                    for b in raw_bytes:
+                        crc ^= b << 8
+                        for _ in range(8):
+                            crc = (crc << 1) ^ (0x1021 if crc & 0x8000 else 0)
+                    crc &= 0xFFFF
+                    full = raw_bytes + bytes([crc >> 8, crc & 0xFF])
+                    wallets_to_try.append(base64.urlsafe_b64encode(full).decode().rstrip("="))
+                except Exception:
+                    pass
+
+        for w_addr in wallets_to_try:
+            w_enc = urllib.parse.quote(w_addr, safe="")
+            for ep, pname in [
+                ("/api/nft/get-by-wallet-address", "walletAddress"),
+                ("/api/nft/get-by-wallet-address", "address"),
+                ("/api/nft/get-by-owner",           "ownerAddress"),
+                ("/api/nft/get-by-owner",           "wallet"),
+                ("/api/nft/get-by-owner-wallet",    "walletAddress"),
+                ("/api/nft/get-my",                 "walletAddress"),
+                ("/api/user/get-by-wallet",         "walletAddress"),
+                ("/api/wallet/nfts",                "address"),
+            ]:
+                _probe_gm(f"https://api.gomining.com{ep}?{pname}={w_enc}")
 
         results["gomining_api_probes"] = gm_probes
 

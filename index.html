@@ -2320,6 +2320,7 @@ async function debugNftBlockchain() {
       lines.push(`&nbsp;&nbsp;Индекс: ${tn.index ?? "?"} | Имя: ${esc(tn.name || "?")}`);
       lines.push(`&nbsp;&nbsp;metadata поля: [${esc(tn.metadata_keys?.join(", ") || "нет")}]`);
       lines.push(`&nbsp;&nbsp;external_url: ${esc(tn.external_url || "(пусто)")}`);
+      if (tn.owner_wallet) lines.push(`&nbsp;&nbsp;owner wallet: <code style="font-size:10px">${esc(tn.owner_wallet)}</code>`);
       if (tn.buttons != null) {
         const btnStr = typeof tn.buttons === "string" ? tn.buttons : JSON.stringify(tn.buttons);
         const UUID_RE2 = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
