@@ -1412,6 +1412,26 @@ async function fetchMinerByAddress(tonAddr) {
     } catch(e2) { /* optional */ }
   }
 
+  if (!uuid && IS_LOCAL && ton.rawAddress) {
+    // Strategy 1c: marketplace TON address index — works for miners listed on GoMining marketplace
+    try {
+      const r = await fetch(`/gm-lookup-by-ton-addr?addr=${encodeURIComponent(ton.rawAddress)}`);
+      const j = await r.json();
+      if (j.ok && j.found && j.uuid) {
+        console.log("[gm-market-ton] found by TON addr:", ton.rawAddress, "uuid:", j.uuid);
+        uuid = j.uuid;
+        miner.externalUrlId = uuid;
+        const gm = parseGmData(j.miner || {});
+        if (gm.power)        miner.realPower  = gm.power;
+        if (gm.efficiency)   miner.realEff    = gm.efficiency;
+        if (gm.isUpgraded)   miner.isUpgraded = gm.isUpgraded;
+        if (gm.priceUsdt)    miner.priceUsdt  = gm.priceUsdt;
+        miner.dataSource.push("gomining ✓ (маркет-адрес)");
+        if (miner.realPower) return miner;
+      }
+    } catch(e2) { /* optional */ }
+  }
+
   if (!uuid && tonAddr) {
     // Strategy 2: ask getgems GraphQL for externalLink on this NFT address
     // For GoMining miners getgems stores "https://app.gomining.com/nft/view/{uuid}"
@@ -1461,6 +1481,18 @@ async function fetchMinerByAddress(tonAddr) {
         miner.dataSource.push(`gomining: нет данных (${hint})`);
       }
     } catch(e) { if (e.message.includes("401")) throw e; }
+  }
+
+  // Fallback: if real power still unknown, try /gm-baseline to get BASELINE_POWER from on-chain attributes
+  if (!miner.realPower && !miner.baselinePower && IS_LOCAL) {
+    try {
+      const r = await fetch(`/gm-baseline?addr=${encodeURIComponent(tonAddr)}`);
+      const j = await r.json();
+      if (j.ok && j.baseline_power != null) {
+        miner.baselinePower = j.baseline_power;
+        miner.dataSource.push("baseline: on-chain ✓");
+      }
+    } catch(e2) { /* optional */ }
   }
 
   miner.name = miner.name || tonAddr;

@@ -501,6 +501,59 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                  "cacheSize": len((_gm_market_cache or {}).get("by_name_num", {}))})
             return
 
+        # ── /gm-lookup-by-ton-addr — find miner UUID via marketplace TON address index ──
+        if path == "/gm-lookup-by-ton-addr":
+            addr = qs.get("addr", [""])[0].strip().lower()
+            if not addr or not Handler.token:
+                self.send_json(400, {"ok": False, "error": "addr and token required"})
+                return
+            now = time.time()
+            if not _gm_market_cache or (now - _gm_market_cache_ts >= _GM_MARKET_TTL):
+                result = self._scan_gm_marketplace()
+                if result:
+                    _gm_market_cache = result
+                    _gm_market_cache_ts = now
+            if not _gm_market_cache:
+                self.send_json(502, {"ok": False, "error": "marketplace unavailable"})
+                return
+            miner = _gm_market_cache.get("by_ton_address", {}).get(addr)
+            if not miner:
+                self.send_json(200, {"ok": True, "found": False,
+                                     "cacheSize": len(_gm_market_cache.get("by_ton_address", {}))})
+                return
+            uuid = miner.get("externalUrlId")
+            if not uuid:
+                ipfs_url = miner.get("ipfs")
+                if ipfs_url:
+                    uuid = self._uuid_from_ipfs(ipfs_url)
+            self.send_json(200, {"ok": True, "found": True, "uuid": uuid, "miner": miner})
+            return
+
+        # ── /gm-baseline — get BASELINE_POWER from on-chain NFT attributes ─────────
+        if path == "/gm-baseline":
+            addr = qs.get("addr", [""])[0].strip()
+            if not addr:
+                self.send_json(400, {"ok": False, "error": "addr required"})
+                return
+            try:
+                import re as _re
+                nft_url = f"https://tonapi.io/v2/nfts/{urllib.parse.quote(addr, safe='')}"
+                req = urllib.request.Request(nft_url)
+                req.add_header("Accept", "application/json")
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    nft = json.loads(resp.read())
+                attrs = nft.get("metadata", {}).get("attributes", [])
+                baseline = None
+                for a in attrs:
+                    if str(a.get("trait_type", "")).upper() == "BASELINE_POWER":
+                        try: baseline = float(a.get("value", 0))
+                        except: pass
+                        break
+                self.send_json(200, {"ok": True, "baseline_power": baseline, "attributes": attrs})
+            except Exception as ex:
+                self.send_json(502, {"ok": False, "error": str(ex)[:200]})
+            return
+
         # ── /gm-by-token-id — look up any miner by tokenId ───────────────────────
         if path == "/gm-by-token-id":
             token_id = qs.get("tokenId", [""])[0].strip()
@@ -1096,8 +1149,9 @@ query Q($address: String!) {
         import re as _re
         ENDPOINT = "/api/nft/marketplace-index"
 
-        by_name_num: dict = {}
-        by_ext_id:   dict = {}
+        by_name_num:    dict = {}
+        by_ext_id:      dict = {}
+        by_ton_address: dict = {}
 
         def _extract(data) -> tuple[list, dict]:
             """Return (items_list, meta_dict) from any response shape."""
@@ -1137,7 +1191,7 @@ query Q($address: String!) {
                     try: total_known = int(total_known)
                     except: total_known = None
                 for m in items0:
-                    self._index_market_miner(m, by_name_num, by_ext_id, _re)
+                    self._index_market_miner(m, by_name_num, by_ext_id, by_ton_address, _re)
                 print(f"[marketplace] page 1 (empty body): {len(items0)} items, total={total_known}")
                 # If first page returned less than per_page, try again with explicit body
                 if len(items0) < per_page:
@@ -1147,7 +1201,7 @@ query Q($address: String!) {
                         if len(items2) > len(items0):
                             # Explicit body gives more — use it
                             by_name_num.clear(); by_ext_id.clear()
-                            for m in items2: self._index_market_miner(m, by_name_num, by_ext_id, _re)
+                            for m in items2: self._index_market_miner(m, by_name_num, by_ext_id, by_ton_address, _re)
                             total_known = meta2.get("total") or meta2.get("count") or total_known
                             print(f"[marketplace] page 1 (explicit body): {len(items2)} items")
                             if len(items2) < per_page:
@@ -1166,7 +1220,7 @@ query Q($address: String!) {
                 break
 
             for m in items:
-                self._index_market_miner(m, by_name_num, by_ext_id, _re)
+                self._index_market_miner(m, by_name_num, by_ext_id, by_ton_address, _re)
             print(f"[marketplace] page {page}: {len(items)} items (total indexed: {len(by_name_num)})")
 
             if total_known and len(by_name_num) >= total_known:
@@ -1177,17 +1231,18 @@ query Q($address: String!) {
         if not by_name_num and not by_ext_id:
             return None
 
-        print(f"[marketplace] done — {len(by_name_num)} miners indexed")
+        print(f"[marketplace] done — {len(by_name_num)} miners indexed, {len(by_ton_address)} by TON addr")
         return {
-            "by_name_num": by_name_num,
-            "by_ext_id":   by_ext_id,
-            "count":       len(by_name_num),
-            "endpoint":    ENDPOINT,
+            "by_name_num":    by_name_num,
+            "by_ext_id":      by_ext_id,
+            "by_ton_address": by_ton_address,
+            "count":          len(by_name_num),
+            "endpoint":       ENDPOINT,
         }
 
     @staticmethod
-    def _index_market_miner(m: dict, name_idx: dict, ext_idx: dict, re_mod) -> None:
-        """Index a marketplace miner entry by name-number and by externalUrlId."""
+    def _index_market_miner(m: dict, name_idx: dict, ext_idx: dict, addr_idx: dict, re_mod) -> None:
+        """Index a marketplace miner entry by name-number, externalUrlId, and wallet address."""
         name = m.get("name", "")
         match = re_mod.search(r"\d{3,7}", name)
         if match:
@@ -1195,6 +1250,24 @@ query Q($address: String!) {
         ext = m.get("externalUrlId")
         if ext:
             ext_idx[str(ext)] = m
+        wallet = m.get("wallet") or {}
+        addr = wallet.get("address") if isinstance(wallet, dict) else None
+        if addr:
+            addr_idx[addr.lower()] = m
+
+    def _uuid_from_ipfs(self, ipfs_url: str) -> str | None:
+        """Fetch IPFS metadata and extract UUID from external_url field."""
+        import re
+        try:
+            req = urllib.request.Request(ipfs_url)
+            req.add_header("Accept", "application/json")
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read())
+            ext_url = data.get("external_url", "")
+            m = re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", ext_url)
+            return m.group(0) if m else None
+        except Exception:
+            return None
 
     def _scrape_getgems_uuid(self, nft_addr: str) -> str | None:
         """Fetch the getgems NFT page and extract GoMining externalUrlId (UUID)."""
