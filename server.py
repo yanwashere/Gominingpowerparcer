@@ -1200,7 +1200,7 @@ query Q($address: String!) {
                         items2, meta2 = _extract(data2)
                         if len(items2) > len(items0):
                             # Explicit body gives more — use it
-                            by_name_num.clear(); by_ext_id.clear()
+                            by_name_num.clear(); by_ext_id.clear(); by_ton_address.clear()
                             for m in items2: self._index_market_miner(m, by_name_num, by_ext_id, by_ton_address, _re)
                             total_known = meta2.get("total") or meta2.get("count") or total_known
                             print(f"[marketplace] page 1 (explicit body): {len(items2)} items")
@@ -1250,10 +1250,10 @@ query Q($address: String!) {
         ext = m.get("externalUrlId")
         if ext:
             ext_idx[str(ext)] = m
-        wallet = m.get("wallet") or {}
-        addr = wallet.get("address") if isinstance(wallet, dict) else None
-        if addr:
-            addr_idx[addr.lower()] = m
+        # Index by blockchain NFT address (top-level "address" field, raw 0:... form)
+        nft_addr = m.get("address")
+        if nft_addr:
+            addr_idx[nft_addr.lower()] = m
 
     def _uuid_from_ipfs(self, ipfs_url: str) -> str | None:
         """Fetch IPFS metadata and extract UUID from external_url field."""
