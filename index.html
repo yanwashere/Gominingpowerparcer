@@ -2340,14 +2340,15 @@ async function debugNftBlockchain() {
     const cd = j.results?.blockchain_get_collection_data;
     if (cd) {
       lines.push(`<b>get_collection_data (HTTP ${cd.http_status}):</b>`);
-      lines.push(`&nbsp;&nbsp;collection_content BOC: <code style="font-size:10px">${esc(String(cd.collection_content_boc || "(нет)").substring(0,60))}</code>`);
-      lines.push(`&nbsp;&nbsp;base URL <b>декодирован</b>: <b style="color:var(--cyan)">${esc(cd.collection_content_decoded || "(не удалось)")}</b>`);
+      lines.push(`&nbsp;&nbsp;collection meta URL: <code style="font-size:10px">${esc(cd.collection_meta_url || "(нет)")}</code>`);
+      lines.push(`&nbsp;&nbsp;items base directory: <b style="color:var(--cyan)">${esc(cd.collection_dir_url || "(не удалось)")}</b>`);
     }
     lines.push("");
 
-    // full constructed URL
-    if (j.full_metadata_url) {
-      lines.push(`<b>Полный metadata URL:</b> <code>${esc(j.full_metadata_url)}</code>`);
+    // correct constructed URL
+    if (j.correct_item_url) {
+      lines.push(`<b>Правильный URL айтема:</b>`);
+      lines.push(`&nbsp;&nbsp;<code style="word-break:break-all">${esc(j.correct_item_url)}</code>`);
       lines.push("");
     }
 

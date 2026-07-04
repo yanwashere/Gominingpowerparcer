@@ -643,7 +643,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             results["blockchain_get_nft_data"] = {"http_status": status2, "error": "no data"}
 
         # ── 3. get_collection_data — find the base metadata URL ──────────────────
-        collection_base_url = None
+        # collection_content points to the collection's own metadata FILE.
+        # The item metadata directory = parent of that file.
+        # e.g. "https://s.getgems.io/nft/b/c/694ea6dd.../meta.json"
+        #   → directory: "https://s.getgems.io/nft/b/c/694ea6dd.../"
+        #   → item URL:   "https://s.getgems.io/nft/b/c/694ea6dd.../1070/meta.json"
+        collection_meta_url = None   # URL of collection's meta.json
+        collection_dir_url = None    # directory (parent of meta.json) — base for items
         if collection_addr_raw:
             col_enc = urllib.parse.quote(collection_addr_raw, safe="")
             status3, coll = _tonapi_get(
@@ -653,39 +659,68 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 coll_decoded = coll.get("decoded") or {}
                 col_content_boc = coll_decoded.get("collection_content")
                 col_base_decoded = self._decode_boc_string(col_content_boc) if col_content_boc else None
+                # Derive directory by stripping the filename part
+                if col_base_decoded:
+                    collection_meta_url = col_base_decoded
+                    if "/" in col_base_decoded:
+                        collection_dir_url = col_base_decoded.rsplit("/", 1)[0] + "/"
+                    else:
+                        collection_dir_url = col_base_decoded.rstrip("/") + "/"
                 results["blockchain_get_collection_data"] = {
                     "http_status": status3,
                     "collection_content_boc": col_content_boc,
-                    "collection_content_decoded": col_base_decoded,
+                    "collection_meta_url": collection_meta_url,
+                    "collection_dir_url": collection_dir_url,
                     "decoded_keys": list(coll_decoded.keys()),
                 }
-                collection_base_url = col_base_decoded
             else:
                 results["blockchain_get_collection_data"] = {"http_status": status3, "error": "no data"}
 
         # ── 4. Construct full metadata URL and fetch it ───────────────────────────
+        # The correct item URL = collection_dir_url + individual_content_path
+        # e.g. "https://s.getgems.io/nft/b/c/694ea6dd.../" + "1070/meta.json"
         index = (nft or {}).get("index")
         metadata_probes: dict = {}
 
-        def _probe(url: str) -> None:
-            st, body = _fetch_json(url)
-            if body and st == 200:
-                all_text = json.dumps(body)
-                uuids = list(set(UUID_RE.findall(all_text)))
-                metadata_probes[url] = {
-                    "ok": True,
-                    "keys": list(body.keys()) if isinstance(body, dict) else f"list",
-                    "uuids_found": uuids,
-                    "preview": {k: str(v)[:120] for k, v in list(body.items())[:10]} if isinstance(body, dict) else {},
-                }
-            else:
-                metadata_probes[url] = {"ok": False, "http_status": st}
+        def _probe(url: str, extra_headers: dict | None = None) -> None:
+            req = urllib.request.Request(url)
+            req.add_header("Accept", "application/json")
+            req.add_header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+            # For getgems CDN: add referer + origin so it looks like a browser request
+            if "getgems" in url or "s.getgems" in url:
+                req.add_header("Origin", "https://getgems.io")
+                req.add_header("Referer", "https://getgems.io/")
+                req.add_header("Accept-Language", "en-US,en;q=0.9")
+                req.add_header("sec-ch-ua", '"Google Chrome";v="125"')
+                req.add_header("sec-ch-ua-platform", '"macOS"')
+            if extra_headers:
+                for k, v in extra_headers.items():
+                    req.add_header(k, v)
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    body = json.loads(resp.read())
+                    all_text = json.dumps(body)
+                    uuids = list(set(UUID_RE.findall(all_text)))
+                    metadata_probes[url] = {
+                        "ok": True,
+                        "keys": list(body.keys()) if isinstance(body, dict) else "list",
+                        "uuids_found": uuids,
+                        "preview": {k: str(v)[:120] for k, v in list(body.items())[:12]} if isinstance(body, dict) else {},
+                    }
+            except urllib.error.HTTPError as e:
+                metadata_probes[url] = {"ok": False, "http_status": e.code}
+            except Exception as ex:
+                metadata_probes[url] = {"ok": False, "error": str(ex)[:80]}
 
-        # Candidate 1: collection_base + decoded_path (THE key combination)
-        if collection_base_url and decoded_path:
-            _probe(collection_base_url.rstrip("/") + "/" + decoded_path.lstrip("/"))
+        # PRIMARY: collection_dir + decoded_path — this is the correct construction
+        if collection_dir_url and decoded_path:
+            _probe(collection_dir_url + decoded_path.lstrip("/"))
 
-        # Candidate 2: known GoMining domains + decoded path
+        # Also try the collection meta.json to see what it contains
+        if collection_meta_url:
+            _probe(collection_meta_url)
+
+        # Fallback: known GoMining domains + decoded path
         if decoded_path:
             for base in [
                 "https://nft.gomining.com",
@@ -694,30 +729,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ]:
                 _probe(f"{base}/{decoded_path.lstrip('/')}")
 
-        # Candidate 3: base + index (in case individual_content is just a subfolder)
-        if collection_base_url and index is not None:
-            _probe(f"{collection_base_url.rstrip('/')}/{index}/meta.json")
-            _probe(f"{collection_base_url.rstrip('/')}/{index}")
-
         results["metadata_url_probes"] = metadata_probes
 
-        # ── Summary ───────────────────────────────────────────────────────────────
+        # ── Summary: only collect actual UUID-format strings ─────────────────────
         all_uuids: set = set()
-        def _collect(d: dict) -> None:
+        def _collect_uuids(d: dict) -> None:
             for v in d.values():
-                if isinstance(v, list):
-                    all_uuids.update(v)
+                if isinstance(v, str):
+                    all_uuids.update(UUID_RE.findall(v))
+                elif isinstance(v, list):
+                    for item in v:
+                        if isinstance(item, str):
+                            all_uuids.update(UUID_RE.findall(item))
                 elif isinstance(v, dict):
-                    _collect(v)
-        _collect(results)
+                    _collect_uuids(v)
+        _collect_uuids(results)
+
+        correct_item_url = (collection_dir_url + decoded_path.lstrip("/")) \
+            if collection_dir_url and decoded_path else None
 
         return {
             "ok": True,
             "addr": nft_addr,
             "decoded_path": decoded_path,
-            "collection_base_url": collection_base_url,
-            "full_metadata_url": (collection_base_url.rstrip("/") + "/" + decoded_path.lstrip("/"))
-                                  if collection_base_url and decoded_path else None,
+            "collection_meta_url": collection_meta_url,
+            "collection_dir_url": collection_dir_url,
+            "correct_item_url": correct_item_url,
             "all_uuids_found": list(all_uuids),
             "results": results,
         }
